@@ -59,6 +59,7 @@ from pretix.base.services.mail import SendMailException
 from pretix.base.settings import SettingsSandbox
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
+from pretix.plugins.paypal.api import Api
 from pretix.plugins.paypal.models import ReferencedPayPalObject
 
 logger = logging.getLogger('pretix.plugins.paypal')
@@ -223,18 +224,20 @@ class Paypal(BasePaymentProvider):
 
     def init_api(self):
         if self.settings.connect_client_id and not self.settings.secret:
-            paypalrestsdk.set_config(
+            paypalrestsdk.api.__api__ = Api(
                 mode="sandbox" if "sandbox" in self.settings.connect_endpoint else 'live',
                 client_id=self.settings.connect_client_id,
                 client_secret=self.settings.connect_secret_key,
                 openid_client_id=self.settings.connect_client_id,
                 openid_client_secret=self.settings.connect_secret_key,
-                openid_redirect_uri=urllib.parse.quote(build_global_uri('plugins:paypal:oauth.return')))
+                openid_redirect_uri=urllib.parse.quote(build_global_uri('plugins:paypal:oauth.return'))
+            )
         else:
-            paypalrestsdk.set_config(
+            paypalrestsdk.api.__api__ = Api(
                 mode="sandbox" if "sandbox" in self.settings.get('endpoint') else 'live',
                 client_id=self.settings.get('client_id'),
-                client_secret=self.settings.get('secret'))
+                client_secret=self.settings.get('secret')
+            )
 
     def payment_is_valid_session(self, request):
         return (request.session.get('payment_paypal_id', '') != ''
