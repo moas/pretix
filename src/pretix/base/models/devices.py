@@ -179,6 +179,7 @@ class Device(LoggedModel):
         return {
             'can_view_orders',
             'can_change_orders',
+            'can_view_vouchers',
             'can_manage_gift_cards'
         }
 
@@ -254,7 +255,9 @@ class Device(LoggedModel):
         :param request: Ignored, for compatibility with User model
         :return: Iterable of Events
         """
-        if permission in self.permission_set():
+        if (
+                isinstance(permission, (list, tuple)) and any(p in self.permission_set() for p in permission)
+        ) or (isinstance(permission, str) and permission in self.permission_set()):
             return self.get_events_with_any_permission()
         else:
             return self.organizer.events.none()

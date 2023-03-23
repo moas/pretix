@@ -35,13 +35,16 @@ from tests.testdummy.signals import FoobazSalesChannel
 
 from pretix.base.decimal import round_decimal
 from pretix.base.models import (
-    CartPosition, Event, InvoiceAddress, Item, Order, OrderPosition, Organizer,
-    SeatingPlan,
+    CartPosition, Event, GiftCard, InvoiceAddress, Item, Order, OrderPosition,
+    Organizer, SeatingPlan,
 )
 from pretix.base.models.items import SubEventItem
 from pretix.base.models.orders import OrderFee, OrderPayment, OrderRefund
-from pretix.base.payment import FreeOrderProvider
+from pretix.base.payment import (
+    FreeOrderProvider, GiftCardPayment, PaymentException,
+)
 from pretix.base.reldate import RelativeDate, RelativeDateWrapper
+from pretix.base.secrets import assign_ticket_secret
 from pretix.base.services.invoices import generate_invoice
 from pretix.base.services.orders import (
     OrderChangeManager, OrderError, _create_order, approve_order, cancel_order,
@@ -76,7 +79,16 @@ def test_expiry_days(event):
     event.settings.set('payment_term_days', 5)
     event.settings.set('payment_term_weekdays', False)
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 5
 
@@ -87,14 +99,32 @@ def test_expiry_weekdays(event):
     event.settings.set('payment_term_days', 5)
     event.settings.set('payment_term_weekdays', True)
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 6
     assert order.expires.weekday() == 0
 
     today = make_aware(datetime(2016, 9, 19, 15, 0, 0, 0))
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 7
     assert order.expires.weekday() == 0
@@ -108,7 +138,16 @@ def test_expiry_minutes(event):
     event.settings.set('payment_term_minutes', 30)
     event.settings.set('payment_term_weekdays', False)
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 0
     assert (order.expires - today).seconds == 30 * 60
@@ -121,12 +160,30 @@ def test_expiry_last(event):
     event.settings.set('payment_term_weekdays', False)
     event.settings.set('payment_term_last', now() + timedelta(days=3))
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 3
     event.settings.set('payment_term_last', now() + timedelta(days=7))
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 5
 
@@ -142,7 +199,16 @@ def test_expiry_last_relative(event):
         RelativeDate(days_before=2, time=None, base_date_name='date_from', minutes_before=None)
     ))
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 3
 
@@ -173,7 +239,16 @@ def test_expiry_last_relative_subevents(event):
         RelativeDate(days_before=2, time=None, base_date_name='date_from', minutes_before=None)
     ))
     order = _create_order(event, email='dummy@example.org', positions=[cp1, cp2],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert (order.expires - today).days == 6
 
@@ -185,7 +260,16 @@ def test_expiry_dst(event):
     utc = pytz.timezone('UTC')
     today = tz.localize(datetime(2016, 10, 29, 12, 0, 0)).astimezone(utc)
     order = _create_order(event, email='dummy@example.org', positions=[],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     localex = order.expires.astimezone(tz)
     assert (localex.hour, localex.minute) == (23, 59)
@@ -283,6 +367,21 @@ def test_expire_twice(event):
     o2 = Order.objects.get(id=o2.id)
     assert o2.status == Order.STATUS_EXPIRED
     assert o2.invoices.count() == 2
+
+
+@pytest.mark.django_db
+def test_expire_skipped_if_canceled_with_fee(event):
+    o2 = Order.objects.create(
+        code='FO2', event=event, email='dummy@dummy.test',
+        status=Order.STATUS_PENDING, locale='en',
+        datetime=now(), expires=now() - timedelta(days=10),
+        total=12,
+    )
+    o2.fees.create(fee_type=OrderFee.FEE_TYPE_CANCELLATION, value=12)
+    generate_invoice(o2)
+    expire_orders(None)
+    o2 = Order.objects.get(id=o2.id)
+    assert o2.status == Order.STATUS_PENDING
 
 
 @pytest.mark.django_db
@@ -469,6 +568,17 @@ class PaymentReminderTests(TestCase):
         self.event.settings.mail_days_order_expire_warning = 10
         send_expiry_warnings(sender=self.event)
         assert len(djmail.outbox) == 1
+        assert "only guarantee your order" in djmail.outbox[0].body
+
+    @classscope(attr='o')
+    def test_sent_no_expiry(self):
+        self.order.valid_if_pending = True
+        self.order.save()
+        self.event.settings.mail_days_order_expire_warning = 10
+        send_expiry_warnings(sender=self.event)
+        assert len(djmail.outbox) == 1
+        assert "only guarantee your order" not in djmail.outbox[0].body
+        assert "required to pay" in djmail.outbox[0].body
 
     @classscope(attr='o')
     def test_sent_not_immediately_after_purchase(self):
@@ -1624,6 +1734,20 @@ class OrderChangeManagerTests(TestCase):
         self.ocm.add_position(self.ticket, None, Decimal('0.00'))
         self.ocm.commit()
         assert self.order.invoices.count() == 3
+
+    @classscope(attr='o')
+    def test_reissue_invoice_after_tax_change(self):
+        generate_invoice(self.order)
+        self.tr7.rate = Decimal('18.00')
+        self.tr7.save()
+        assert self.order.invoices.count() == 1
+        self.ocm.recalculate_taxes(keep='gross')
+        print(self.ocm._operations)
+        self.ocm.commit()
+        self.order.refresh_from_db()
+        assert self.order.invoices.count() == 3
+        new_inv = self.order.invoices.get(is_cancellation=False, refered__isnull=True)
+        assert new_inv.lines.first().tax_rate == Decimal('18.00')
 
     @classscope(attr='o')
     def test_no_new_invoice_for_free_order(self):
@@ -2806,6 +2930,62 @@ class OrderChangeManagerTests(TestCase):
         assert self.op1.used_membership is None
         assert self.op1.item == self.ticket
 
+    @classscope(attr='o')
+    def test_add_block(self):
+        self.ocm.add_block(self.op1, "admin")
+        self.ocm.commit()
+        self.op1.refresh_from_db()
+        assert self.op1.blocked == ["admin"]
+        bs = self.op1.blocked_secrets.get()
+        assert bs.secret == self.op1.secret
+        assert bs.blocked
+
+    @classscope(attr='o')
+    def test_remove_block(self):
+        self.op1.blocked = ["admin"]
+        self.op1.save()
+        bs = self.op1.blocked_secrets.create(event=self.event, secret=self.op1.secret, blocked=True)
+        self.ocm.remove_block(self.op1, "admin")
+        self.ocm.commit()
+        self.op1.refresh_from_db()
+        assert self.op1.blocked is None
+        bs.refresh_from_db()
+        assert not bs.blocked
+
+    @classscope(attr='o')
+    def test_set_valid_from(self):
+        old_secret = self.op1.secret
+        dt = make_aware(datetime(2016, 9, 20, 15, 0, 0, 0))
+        self.ocm.change_valid_from(self.op1, dt)
+        self.ocm.commit()
+        self.op1.refresh_from_db()
+        assert self.op1.valid_from == dt
+        assert self.op1.secret == old_secret
+
+    @classscope(attr='o')
+    def test_set_valid_until(self):
+        self.event.settings.ticket_secret_generator = "pretix_sig1"
+        assign_ticket_secret(self.event, self.op1, force_invalidate=True, save=True)
+        old_secret = self.op1.secret
+
+        dt = make_aware(datetime(2022, 9, 20, 15, 0, 0, 0))
+        self.ocm.change_valid_until(self.op1, dt)
+        self.ocm.commit()
+        self.op1.refresh_from_db()
+        assert self.op1.secret != old_secret
+
+    @classscope(attr='o')
+    def test_unset_valid_from_until(self):
+        self.op1.valid_from = make_aware(datetime(2016, 9, 20, 15, 0, 0, 0))
+        self.op1.valid_until = make_aware(datetime(2016, 9, 20, 15, 0, 0, 0))
+        self.op1.save()
+        self.ocm.change_valid_from(self.op1, None)
+        self.ocm.change_valid_until(self.op1, None)
+        self.ocm.commit()
+        self.op1.refresh_from_db()
+        assert self.op1.valid_from is None
+        assert self.op1.valid_until is None
+
 
 @pytest.mark.django_db
 def test_autocheckin(clist_autocheckin, event):
@@ -2817,7 +2997,16 @@ def test_autocheckin(clist_autocheckin, event):
         item=ticket, price=23, expires=now() + timedelta(days=1), event=event, cart_id="123"
     )
     order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert "web" in clist_autocheckin.auto_checkin_sales_channels
     assert order.positions.first().checkins.first().auto_checked_in
@@ -2826,7 +3015,16 @@ def test_autocheckin(clist_autocheckin, event):
     clist_autocheckin.save()
 
     order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de')[0]
     assert clist_autocheckin.auto_checkin_sales_channels == []
     assert order.positions.first().checkins.count() == 0
@@ -2843,23 +3041,59 @@ def test_saleschannel_testmode_restriction(event):
     )
 
     order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de', sales_channel='web')[0]
     assert not order.testmode
 
     order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de', sales_channel=FoobazSalesChannel.identifier)[0]
     assert not order.testmode
 
     event.testmode = True
     order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de', sales_channel='web')[0]
     assert order.testmode
 
     order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=today, payment_provider=FreeOrderProvider(event),
+                          now_dt=today,
+                          payment_requests=[{
+                              "id": "test0",
+                              "provider": "free",
+                              "max_value": None,
+                              "min_value": None,
+                              "multi_use_supported": False,
+                              "info_data": {},
+                              "pprov": FreeOrderProvider(event),
+                          }],
                           locale='de', sales_channel=FoobazSalesChannel.identifier)[0]
     assert not order.testmode
 
@@ -2875,13 +3109,44 @@ def test_giftcard_multiple(event):
     gc1.transactions.create(value=12)
     gc2 = event.organizer.issued_gift_cards.create(currency="EUR")
     gc2.transactions.create(value=12)
-    order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=now(), payment_provider=BankTransfer(event),
-                          locale='de', gift_cards=[gc1.pk, gc2.pk])[0]
-    assert order.payments.count() == 3
+    order = _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc2.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+        ],
+        locale='de'
+    )[0]
+    assert order.payments.count() == 2
+    for p in order.payments.all():
+        p.payment_provider.execute_payment(None, p)
+
     assert order.payments.get(info__icontains=gc1.pk).amount == Decimal('12.00')
     assert order.payments.get(info__icontains=gc2.pk).amount == Decimal('11.00')
+    gc1 = GiftCard.objects.get(pk=gc1.pk)
     assert gc1.value == 0
+    gc2 = GiftCard.objects.get(pk=gc2.pk)
     assert gc2.value == 1
 
 
@@ -2894,12 +3159,39 @@ def test_giftcard_partial(event):
     )
     gc1 = event.organizer.issued_gift_cards.create(currency="EUR")
     gc1.transactions.create(value=12)
-    order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=now(), payment_provider=BankTransfer(event),
-                          locale='de', gift_cards=[gc1.pk])[0]
+    order = _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
     assert order.payments.count() == 2
+    for p in order.payments.all():
+        p.payment_provider.execute_payment(None, p)
     assert order.payments.get(info__icontains=gc1.pk).amount == Decimal('12.00')
     assert order.payments.get(provider='banktransfer').amount == Decimal('11.00')
+    gc1 = GiftCard.objects.get(pk=gc1.pk)
     assert gc1.value == 0
 
 
@@ -2914,13 +3206,40 @@ def test_giftcard_payment_fee(event):
     )
     gc1 = event.organizer.issued_gift_cards.create(currency="EUR")
     gc1.transactions.create(value=12)
-    order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=now(), payment_provider=BankTransfer(event),
-                          locale='de', gift_cards=[gc1.pk])[0]
+    order = _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
     assert order.payments.count() == 2
     assert order.payments.get(info__icontains=gc1.pk).amount == Decimal('12.00')
     assert order.payments.get(provider='banktransfer').amount == Decimal('12.10')
+    for p in order.payments.all():
+        p.payment_provider.execute_payment(None, p)
     assert order.fees.get().value == Decimal('1.10')
+    gc1 = GiftCard.objects.get(pk=gc1.pk)
     assert gc1.value == 0
 
 
@@ -2933,10 +3252,36 @@ def test_giftcard_invalid_currency(event):
     )
     gc1 = event.organizer.issued_gift_cards.create(currency="USD")
     gc1.transactions.create(value=12)
-    with pytest.raises(OrderError):
-        _create_order(event, email='dummy@example.org', positions=[cp1],
-                      now_dt=now(), payment_provider=BankTransfer(event),
-                      locale='de', gift_cards=[gc1.pk])[0]
+    _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
+    with pytest.raises(PaymentException):
+        for p in Order.objects.get().payments.all():
+            p.payment_provider.execute_payment(None, p)
 
 
 @pytest.mark.django_db
@@ -2949,10 +3294,36 @@ def test_giftcard_invalid_organizer(event):
     o2 = Organizer.objects.create(slug="foo", name="bar")
     gc1 = o2.issued_gift_cards.create(currency="EUR")
     gc1.transactions.create(value=12)
-    with pytest.raises(OrderError):
-        _create_order(event, email='dummy@example.org', positions=[cp1],
-                      now_dt=now(), payment_provider=BankTransfer(event),
-                      locale='de', gift_cards=[gc1.pk])[0]
+    _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
+    with pytest.raises(PaymentException):
+        for p in Order.objects.get().payments.all():
+            p.payment_provider.execute_payment(None, p)
 
 
 @pytest.mark.django_db
@@ -2964,10 +3335,36 @@ def test_giftcard_test_mode_invalid(event):
     )
     gc1 = event.organizer.issued_gift_cards.create(currency="EUR", testmode=True)
     gc1.transactions.create(value=12)
-    with pytest.raises(OrderError):
-        _create_order(event, email='dummy@example.org', positions=[cp1],
-                      now_dt=now(), payment_provider=BankTransfer(event),
-                      locale='de', gift_cards=[gc1.pk])[0]
+    _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
+    with pytest.raises(PaymentException):
+        for p in Order.objects.get().payments.all():
+            p.payment_provider.execute_payment(None, p)
 
 
 @pytest.mark.django_db
@@ -2981,10 +3378,36 @@ def test_giftcard_test_mode_event(event):
     event.save()
     gc1 = event.organizer.issued_gift_cards.create(currency="EUR", testmode=False)
     gc1.transactions.create(value=12)
-    with pytest.raises(OrderError):
-        _create_order(event, email='dummy@example.org', positions=[cp1],
-                      now_dt=now(), payment_provider=BankTransfer(event),
-                      locale='de', gift_cards=[gc1.pk])[0]
+    _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
+    with pytest.raises(PaymentException):
+        for p in Order.objects.get().payments.all():
+            p.payment_provider.execute_payment(None, p)
 
 
 @pytest.mark.django_db
@@ -2996,10 +3419,36 @@ def test_giftcard_swap(event):
     )
     gc1 = event.organizer.issued_gift_cards.create(currency="EUR", testmode=False)
     gc1.transactions.create(value=12)
-    with pytest.raises(OrderError):
-        _create_order(event, email='dummy@example.org', positions=[cp1],
-                      now_dt=now(), payment_provider=BankTransfer(event),
-                      locale='de', gift_cards=[gc1.pk])[0]
+    _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test0",
+                "provider": "giftcard",
+                "max_value": "12.00",
+                "min_value": None,
+                "multi_use_supported": True,
+                "info_data": {
+                    "gift_card": gc1.pk
+                },
+                "pprov": GiftCardPayment(event),
+            },
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
+    with pytest.raises(PaymentException):
+        for p in Order.objects.get().payments.all():
+            p.payment_provider.execute_payment(None, p)
 
 
 @pytest.mark.django_db
@@ -3011,9 +3460,22 @@ def test_issue_when_paid_and_changed(event):
     )
     q = event.quotas.create(size=None, name="foo")
     q.items.add(ticket)
-    order = _create_order(event, email='dummy@example.org', positions=[cp1],
-                          now_dt=now(), payment_provider=BankTransfer(event),
-                          locale='de', gift_cards=[])[0]
+    order = _create_order(
+        event, email='dummy@example.org', positions=[cp1],
+        now_dt=now(),
+        payment_requests=[
+            {
+                "id": "test1",
+                "provider": "banktransfer",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+                "pprov": BankTransfer(event),
+            },
+        ],
+        locale='de'
+    )[0]
     op = order.positions.first()
     assert not op.issued_gift_cards.exists()
     order.payments.first().confirm()

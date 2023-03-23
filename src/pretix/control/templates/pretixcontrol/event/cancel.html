@@ -11,11 +11,17 @@
                 <legend>{% trans "Unpaid or free orders" %}</legend>
                 {% bootstrap_field form.cancel_allow_user layout="control" %}
                 {% bootstrap_field form.cancel_allow_user_until layout="control" %}
+                {% bootstrap_field form.cancel_allow_user_unpaid_keep layout="control" %}
+                {% bootstrap_field form.cancel_allow_user_unpaid_keep_percentage layout="control" %}
+                {% bootstrap_field form.cancel_allow_user_unpaid_keep_fees layout="control" %}
             </fieldset>
             <fieldset>
                 <legend>{% trans "Paid orders" %}</legend>
                 {% bootstrap_field form.cancel_allow_user_paid layout="control" %}
                 {% bootstrap_field form.cancel_allow_user_paid_require_approval layout="control" %}
+                <div data-display-dependency="#id_cancel_allow_user_paid_require_approval">
+                    {% bootstrap_field form.cancel_allow_user_paid_require_approval_fee_unknown layout="control" %}
+                </div>
                 {% bootstrap_field form.cancel_allow_user_paid_keep layout="control" %}
                 {% bootstrap_field form.cancel_allow_user_paid_keep_percentage layout="control" %}
                 {% bootstrap_field form.cancel_allow_user_paid_keep_fees layout="control" %}
@@ -61,6 +67,8 @@
                 {% bootstrap_field form.change_allow_user_addons layout="control" %}
                 {% bootstrap_field form.change_allow_user_until layout="control" %}
                 {% bootstrap_field form.change_allow_user_price layout="control" %}
+                {% bootstrap_field form.change_allow_user_if_checked_in layout="control" %}
+                {% bootstrap_field form.change_allow_attendee layout="control" %}
                 <div class="alert alert-info">
                     <p>
                         {% blocktrans trimmed %}

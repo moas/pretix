@@ -25,9 +25,7 @@ from collections import OrderedDict
 
 from celery.exceptions import Retry
 from sentry_sdk import Hub
-from sentry_sdk.integrations.django import (
-    LEGACY_RESOLVER, DjangoIntegration, _before_get_response, _set_user_info,
-)
+from sentry_sdk.integrations import django as djangosentry
 from sentry_sdk.utils import capture_internal_exceptions
 
 MASK = '*' * 8
@@ -83,13 +81,13 @@ def _make_event_processor(weak_request, integration):
             return event
 
         with capture_internal_exceptions():
-            _set_user_info(request, event)
+            djangosentry._set_user_info(request, event)
             request_info = event.setdefault("request", {})
             request_info["cookies"] = dict(request.COOKIES)
 
-        # Sentry's DjangoIntegration already sets the transcation, but it gets confused by our multi-domain stuff
+        # Sentry's DjangoIntegration already sets the transaction, but it gets confused by our multi-domain stuff
         # where the URL resolver changes in the middleware stack. Additionally, we'd like to get the method.
-        url = LEGACY_RESOLVER.resolve(request.path_info, getattr(request, "urlconf", None))
+        url = djangosentry.LEGACY_RESOLVER.resolve(request.path_info, getattr(request, "urlconf", None))
         if hasattr(request, 'event_domain'):
             url = '/{organizer}/{event}' + url
         elif hasattr(request, 'organizer_domain'):
@@ -112,11 +110,11 @@ def _make_event_processor(weak_request, integration):
     return event_processor
 
 
-class PretixSentryIntegration(DjangoIntegration):
+class PretixSentryIntegration(djangosentry.DjangoIntegration):
 
     @staticmethod
     def setup_once():
-        DjangoIntegration.setup_once()
+        djangosentry.DjangoIntegration.setup_once()
         from django.core.handlers.base import BaseHandler
 
         # DjangoIntegration already patched get_response, we patch it again to add our custom
@@ -126,7 +124,7 @@ class PretixSentryIntegration(DjangoIntegration):
 
         def sentry_patched_get_response(self, request):
             hub = Hub.current
-            integration = hub.get_integration(DjangoIntegration)
+            integration = hub.get_integration(djangosentry.DjangoIntegration)
             if integration is not None:
                 with hub.configure_scope() as scope:
                     scope.add_event_processor(
@@ -142,7 +140,7 @@ class PretixSentryIntegration(DjangoIntegration):
                 patch_get_response_async,
             )
 
-            patch_get_response_async(BaseHandler, _before_get_response)
+            patch_get_response_async(BaseHandler, djangosentry._before_get_response)
 
 
 def ignore_retry(event, hint):

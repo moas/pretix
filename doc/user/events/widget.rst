@@ -135,6 +135,10 @@ Alternatively, you can select one or more categories to be shown::
 
    <pretix-widget event="https://pretix.eu/demo/democon/" categories="12,25"></pretix-widget>
 
+Or variation IDs::
+
+   <pretix-widget event="https://pretix.eu/demo/democon/" variations="15,2,68"></pretix-widget>
+
 Multi-event selection
 ---------------------
 
@@ -149,9 +153,9 @@ If you want to include all your public events, you can just reference your organ
 There is an optional ``style`` parameter that let's you choose between a monthly calendar view, a week view and a list
 view. If you do not set it, the choice will be taken from your organizer settings::
 
-   <pretix-widget event="https://pretix.eu/demo/series/" style="list"></pretix-widget>
-   <pretix-widget event="https://pretix.eu/demo/series/" style="calendar"></pretix-widget>
-   <pretix-widget event="https://pretix.eu/demo/series/" style="week"></pretix-widget>
+   <pretix-widget event="https://pretix.eu/demo/series/" list-type="list"></pretix-widget>
+   <pretix-widget event="https://pretix.eu/demo/series/" list-type="calendar"></pretix-widget>
+   <pretix-widget event="https://pretix.eu/demo/series/" list-type="week"></pretix-widget>
 
 If you have more than 100 events, the system might refuse to show a list view and always show a calendar for performance
 reasons instead.
@@ -160,7 +164,7 @@ You can see an example here:
 
 .. raw:: html
 
-    <pretix-widget event="https://pretix.eu/demo/series/" style="calendar"></pretix-widget>
+    <pretix-widget event="https://pretix.eu/demo/series/" list-type="calendar"></pretix-widget>
     <noscript>
        <div class="pretix-widget">
             <div class="pretix-widget-info-message">
@@ -172,7 +176,7 @@ You can see an example here:
 You can filter events by meta data attributes. You can create those attributes in your order profile and set their values in both event and series date
 settings. For example, if you set up a meta data property called "Promoted" that you set to "Yes" on some events, you can pass a filter like this::
 
-   <pretix-widget event="https://pretix.eu/demo/series/" style="list" filter="attr[Promoted]=Yes"></pretix-widget>
+   <pretix-widget event="https://pretix.eu/demo/series/" list-type="list" filter="attr[Promoted]=Yes"></pretix-widget>
 
 pretix Button
 -------------
@@ -407,7 +411,7 @@ Hosted or pretix Enterprise are active, you can pass the following fields:
         };
     </script>
 
-  If you use ```analytics.js` (Universal Analytics)::
+  If you use ``analytics.js`` (Universal Analytics)::
 
     <script>
         (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
@@ -442,9 +446,5 @@ Hosted or pretix Enterprise are active, you can pass the following fields:
         };
     </script>
 
-
-.. versionchanged:: 3.6
-
-   Dynamically opening the widget has been added in pretix 3.6.
 
 .. _Let's Encrypt: https://letsencrypt.org/

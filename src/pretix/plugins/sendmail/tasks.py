@@ -31,24 +31,25 @@
 # Unless required by applicable law or agreed to in writing, software distributed under the Apache License 2.0 is
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
-
+from django.db.models import Exists, OuterRef, Q
 from i18nfield.strings import LazyI18nString
 
 from pretix.base.email import get_email_context
 from pretix.base.i18n import language
-from pretix.base.models import Event, InvoiceAddress, Order, User
+from pretix.base.models import Checkin, Event, InvoiceAddress, Order, User
 from pretix.base.services.mail import SendMailException, mail
 from pretix.base.services.tasks import ProfiledEventTask
 from pretix.celery_app import app
+from pretix.helpers.format import format_map
 
 
 @app.task(base=ProfiledEventTask, acks_late=True)
-def send_mails(event: Event, user: int, subject: dict, message: dict, orders: list, items: list,
-               recipients: str, filter_checkins: bool, not_checked_in: bool, checkin_lists: list,
-               attachments: list = None, attach_tickets: bool = False) -> None:
+def send_mails_to_orders(event: Event, user: int, subject: dict, message: dict, objects: list, items: list,
+                         recipients: str, filter_checkins: bool, not_checked_in: bool, checkin_lists: list,
+                         attachments: list = None, attach_tickets: bool = False) -> None:
     failures = []
     user = User.objects.get(pk=user) if user else None
-    orders = Order.objects.filter(pk__in=orders, event=event)
+    orders = Order.objects.filter(pk__in=objects, event=event)
     subject = LazyI18nString(subject)
     message = LazyI18nString(message)
 
@@ -61,7 +62,19 @@ def send_mails(event: Event, user: int, subject: dict, message: dict, orders: li
             ia = InvoiceAddress(order=o)
 
         if recipients in ('both', 'attendees'):
-            for p in o.positions.prefetch_related('addons'):
+            for p in o.positions.annotate(
+                any_checkins=Exists(
+                    Checkin.objects.filter(
+                        Q(position_id=OuterRef('pk')) | Q(position__addon_to_id=OuterRef('pk')),
+                    )
+                ),
+                matching_checkins=Exists(
+                    Checkin.objects.filter(
+                        Q(position_id=OuterRef('pk')) | Q(position__addon_to_id=OuterRef('pk')),
+                        list_id__in=checkin_lists or []
+                    )
+                ),
+            ).prefetch_related('addons'):
                 if p.addon_to_id is not None:
                     continue
 
@@ -69,10 +82,9 @@ def send_mails(event: Event, user: int, subject: dict, message: dict, orders: li
                     continue
 
                 if filter_checkins:
-                    checkins = list(p.checkins.all())
                     allowed = (
-                        (not_checked_in and not checkins)
-                        or (any(c.list_id in checkin_lists for c in checkins))
+                        (not_checked_in and not p.any_checkins)
+                        or p.matching_checkins
                     )
                     if not allowed:
                         continue
@@ -87,7 +99,7 @@ def send_mails(event: Event, user: int, subject: dict, message: dict, orders: li
 
                 try:
                     with language(o.locale, event.settings.region):
-                        email_context = get_email_context(event=event, order=o, position_or_address=p, position=p)
+                        email_context = get_email_context(event=event, order=o, invoice_address=ia, position=p)
                         mail(
                             p.attendee_email,
                             subject,
@@ -105,8 +117,8 @@ def send_mails(event: Event, user: int, subject: dict, message: dict, orders: li
                             user=user,
                             data={
                                 'position': p.positionid,
-                                'subject': subject.localize(o.locale).format_map(email_context),
-                                'message': message.localize(o.locale).format_map(email_context),
+                                'subject': format_map(subject.localize(o.locale), email_context),
+                                'message': format_map(message.localize(o.locale), email_context),
                                 'recipient': p.attendee_email
                             }
                         )
@@ -116,7 +128,7 @@ def send_mails(event: Event, user: int, subject: dict, message: dict, orders: li
         if send_to_order and o.email:
             try:
                 with language(o.locale, event.settings.region):
-                    email_context = get_email_context(event=event, order=o, position_or_address=ia)
+                    email_context = get_email_context(event=event, order=o, invoice_address=ia)
                     mail(
                         o.email,
                         subject,
@@ -126,16 +138,40 @@ def send_mails(event: Event, user: int, subject: dict, message: dict, orders: li
                         locale=o.locale,
                         order=o,
                         attach_tickets=attach_tickets,
-                        attach_cached_files=attachments
+                        attach_cached_files=attachments,
                     )
                     o.log_action(
                         'pretix.plugins.sendmail.order.email.sent',
                         user=user,
                         data={
-                            'subject': subject.localize(o.locale).format_map(email_context),
-                            'message': message.localize(o.locale).format_map(email_context),
+                            'subject': format_map(subject.localize(o.locale), email_context),
+                            'message': format_map(message.localize(o.locale), email_context),
                             'recipient': o.email
                         }
                     )
             except SendMailException:
                 failures.append(o.email)
+
+
+@app.task(base=ProfiledEventTask, acks_late=True)
+def send_mails_to_waitinglist(event: Event, user: int, subject: dict, message: dict, objects: list,
+                              attachments: list = None) -> None:
+    user = User.objects.get(pk=user) if user else None
+    entries = event.waitinglistentries.filter(pk__in=objects).select_related(
+        'subevent'
+    )
+    subject = LazyI18nString(subject)
+    message = LazyI18nString(message)
+
+    for e in entries:
+        e.send_mail(
+            subject,
+            message,
+            get_email_context(
+                event=e.event,
+                waiting_list_entry=e,
+                event_or_subevent=e.subevent or e.event,
+            ),
+            user=user,
+            attach_cached_files=attachments,
+        )

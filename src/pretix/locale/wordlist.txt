@@ -32,7 +32,9 @@ Ctrl
 customizable
 Customizations
 customizations
+CZK
 datetime
+dekodi
 deliverability
 DSS
 DNS
@@ -69,13 +71,16 @@ Lead
 Leaflet
 LLC
 MapQuest
+MariaDB
 Mercado
 MOTO
 Multibanco
 Mx
 MyBank
 multiline
+NREI
 OpenCage
+OpenID
 OpenStreetMap
 overpayment
 OXXO
@@ -84,8 +89,10 @@ PayU
 PCI
 PDFs
 percentual
+personalization
 POS
 postfix
+PostgreSQL
 prepended
 presale
 pretix
@@ -112,6 +119,7 @@ Sofort
 SOFORT
 Somecity
 SSL
+SSO
 STARTTLS
 Su
 subevent
@@ -144,6 +152,10 @@ WhatsApp
 whitespace
 xlsx
 xml
+XXX
+XXXX
+XXXXX
 Yubikey
 Zimpler
+ZIP
 ZVT

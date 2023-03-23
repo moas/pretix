@@ -1,6 +1,7 @@
 {% extends "pretixpresale/event/base.html" %}
 {% load i18n %}
 {% load bootstrap3 %}
+{% load money %}
 {% load eventurl %}
 {% load eventsignal %}
 {% block title %}{% trans "Review order" %}{% endblock %}
@@ -17,6 +18,9 @@
                 <h3 class="panel-title">
                     <i class="fa fa-shopping-cart" aria-hidden="true"></i>
                     {% trans "Your cart" %}
+                    <a href="{% eventurl request.event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}" class="h6">
+                        <span class="fa fa-edit" aria-hidden="true"></span>{% trans "Add or remove tickets" %}
+                    </a>
                 </h3>
                 <span class="panel-heading-flex-gap"></span>
                 <strong class="helper-display-block" id="cart-deadline-short" data-expires="{{ cart.first_expiry|date:"Y-m-d H:i:sO" }}">
@@ -26,51 +30,55 @@
                         {% trans "Cart expired" %}
                     {% endif %}
                 </strong>
-                <span class="helper-display-block cart-modify">
-                    <a href="{% eventurl request.event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}">
-                        <span class="fa fa-edit" aria-hidden="true"></span>
-                        {% trans "Add or remove tickets" %}
-                    </a>
-                </span>
             </div>
             <div class="panel-body">
                 {% include "pretixpresale/event/fragment_cart.html" with cart=cart event=request.event editable=False %}
             </div>
         </div>
-        {% if payment_provider %}
-            <div class="panel panel-primary">
+        {% if payments %}
+            <div class="panel panel-default">
                 <div class="panel-heading">
-                    {% if payment_provider.identifier != "free" %}
-                        <div class="pull-right flip">
-                            <a href="{% eventurl request.event "presale:event.checkout" step="payment" cart_namespace=cart_namespace|default_if_none:"" %}" aria-label="{% trans "Modify payment" %}">
-                                <span class="fa fa-edit" aria-hidden="true"></span>
-                                {% trans "Modify" %}
-                            </a>
-                        </div>
-                    {% endif %}
                     <h3 class="panel-title">
                         {% trans "Payment" %}
+                        {% if payment_provider.identifier != "free" %}
+                                <a href="{% eventurl request.event "presale:event.checkout" step="payment" cart_namespace=cart_namespace|default_if_none:"" %}" aria-label="{% trans "Modify payment" %}" class="h6">
+                                    <span class="fa fa-edit" aria-hidden="true"></span>{% trans "Modify" %}
+                                </a>
+                        {% endif %}
                     </h3>
                 </div>
-                <div class="panel-body">
-                    {{ payment }}
-                </div>
+                <ul class="list-group">
+                    {% for payment, rendered_block in payments %}
+                        <li class="list-group-item payment">
+                            {% if payments|length > 1 %}
+                                <div class="row">
+                                    <div class="col-sm-10 col-xs-12">
+                                        <h4>{{ payment.provider_name }}</h4>
+                                        {{ rendered_block }}
+                                    </div>
+                                    <div class="col-sm-2 col-xs-12 text-right">
+                                        <h4>{{ payment.payment_amount|money:request.event.currency }}</h4>
+                                    </div>
+                                </div>
+                            {% else %}
+                                {{ rendered_block }}
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
             </div>
         {% endif %}
         {% eventsignal event "pretix.presale.signals.checkout_confirm_page_content" request=request %}
         <div class="row">
             {% if invoice_address_asked %}
                 <div class="col-md-6 col-xs-12">
-                    <div class="panel panel-primary panel-contact">
+                    <div class="panel panel-default panel-contact">
                         <div class="panel-heading">
-                            <div class="pull-right flip">
-                                <a href="{% eventurl request.event "presale:event.checkout" step="questions" cart_namespace=cart_namespace|default_if_none:"" %}?invoice=1" aria-label="{% trans "Modify invoice information" %}">
-                                    <span class="fa fa-edit" aria-hidden="true"></span>
-                                    {% trans "Modify" %}
-                                </a>
-                            </div>
                             <h3 class="panel-title">
                                 {% trans "Invoice information" %}
+                                <a href="{% eventurl request.event "presale:event.checkout" step="questions" cart_namespace=cart_namespace|default_if_none:"" %}?invoice=1" aria-label="{% trans "Modify invoice information" %}" class="h6">
+                                    <span class="fa fa-edit" aria-hidden="true"></span>{% trans "Modify" %}
+                                </a>
                             </h3>
                         </div>
                         <div class="panel-body">
@@ -91,7 +99,7 @@
                                     <dt>{% trans "State" context "address" %}</dt>
                                     <dd>{{ addr.state_name }}</dd>
                                 {% endif %}
-                                {% if request.event.settings.invoice_address_vatid %}
+                                {% if request.event.settings.invoice_address_vatid and addr.vat_id %}
                                     <dt>{% trans "VAT ID" %}</dt>
                                     <dd>{{ addr.vat_id }}</dd>
                                 {% endif %}
@@ -103,24 +111,23 @@
                                     <dt>{{ request.event.settings.invoice_address_custom_field }}</dt>
                                     <dd>{{ addr.custom_field }}</dd>
                                 {% endif %}
-                                <dt>{% trans "Internal reference" %}</dt>
-                                <dd>{{ addr.internal_reference }}</dd>
+                                {% if addr.internal_reference %}
+                                    <dt>{% trans "Internal reference" %}</dt>
+                                    <dd>{{ addr.internal_reference }}</dd>
+                                {% endif %}
                             </dl>
                         </div>
                     </div>
                 </div>
             {% endif %}
             <div class="{% if invoice_address_asked %}col-md-6{% endif %} col-xs-12">
-                <div class="panel panel-primary panel-contact">
+                <div class="panel panel-default panel-contact">
                     <div class="panel-heading">
-                        <div class="pull-right flip">
-                            <a href="{% eventurl request.event "presale:event.checkout" step="questions" cart_namespace=cart_namespace|default_if_none:"" %}" aria-label="{% trans "Modify contact information" %}">
-                                <span class="fa fa-edit" aria-hidden="true"></span>
-                                {% trans "Modify" %}
-                            </a>
-                        </div>
                         <h3 class="panel-title">
                             {% trans "Contact information" %}
+                            <a href="{% eventurl request.event "presale:event.checkout" step="questions" cart_namespace=cart_namespace|default_if_none:"" %}" aria-label="{% trans "Modify contact information" %}" class="h6">
+                                <span class="fa fa-edit" aria-hidden="true"></span>{% trans "Modify" %}
+                            </a>
                         </h3>
                     </div>
                     <div class="panel-body">
@@ -182,9 +189,13 @@
                     {% trans "Your order requires approval by the event organizer before it can be confirmed and forms a valid contract." %}
                 </strong>
                 {% blocktrans trimmed %}
-                    We will sent you an email as soon as the event organizer approved or rejected your order. If your
-                    order was approved, we will send you a link that you can use to pay.
+                    We will sent you an email as soon as the event organizer approved or rejected your order.
                 {% endblocktrans %}
+                {% if cart.total > 0 %}
+                    {% blocktrans trimmed %}
+                         If your order was approved, we will send you a link that you can use to pay.
+                    {% endblocktrans %}
+                {% endif %}
             </div>
         {% endif %}
         <div class="row checkout-button-row clearfix">

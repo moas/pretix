@@ -54,6 +54,7 @@ from pretix.base.payment import PaymentException
 from pretix.base.services.invoices import (
     generate_cancellation, generate_invoice,
 )
+from pretix.base.services.tax import VATIDFinalError, VATIDTemporaryError
 
 
 @pytest.fixture
@@ -79,7 +80,7 @@ def env():
     )
     ticket = Item.objects.create(event=event, name='Early-bird ticket',
                                  category=None, default_price=23,
-                                 admission=True)
+                                 admission=True, personalized=True)
     event.settings.set('attendee_names_asked', True)
     event.settings.set('locales', ['en', 'de'])
     OrderPosition.objects.create(
@@ -105,7 +106,7 @@ def test_order_list(client, env):
     with scopes_disabled():
         otherticket = Item.objects.create(event=env[0], name='Early-bird ticket',
                                           category=None, default_price=23,
-                                          admission=True)
+                                          admission=True, personalized=True)
     client.login(email='dummy@dummy.dummy', password='dummy')
     response = client.get('/control/event/dummy/dummy/orders/')
     assert 'FOO' in response.content.decode()
@@ -495,7 +496,7 @@ def test_order_cancel_pending_fee_too_high(client, env):
     client.get('/control/event/dummy/dummy/orders/FOO/transition?status=c')
     client.post('/control/event/dummy/dummy/orders/FOO/transition', {
         'status': 'c',
-        'cancellation_fee': '6.00'
+        'cancellation_fee': '26.00'
     })
     with scopes_disabled():
         o = Order.objects.get(id=env[2].id)
@@ -506,7 +507,7 @@ def test_order_cancel_pending_fee_too_high(client, env):
 
 
 @pytest.mark.django_db
-def test_order_cancel_unpaid_no_fees_allowed(client, env):
+def test_order_cancel_unpaid_fees_allowed(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     client.get('/control/event/dummy/dummy/orders/FOO/transition?status=c')
     client.post('/control/event/dummy/dummy/orders/FOO/transition', {
@@ -515,10 +516,10 @@ def test_order_cancel_unpaid_no_fees_allowed(client, env):
     })
     with scopes_disabled():
         o = Order.objects.get(id=env[2].id)
-        assert o.positions.exists()
-        assert not o.fees.exists()
-    assert o.status == Order.STATUS_CANCELED
-    assert o.total == Decimal('14.00')
+        assert not o.positions.exists()
+        assert o.fees.exists()
+    assert o.status == Order.STATUS_PENDING
+    assert o.total == Decimal('6.00')
 
 
 @pytest.mark.django_db
@@ -648,7 +649,6 @@ def test_order_reactivate(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     response = client.post('/control/event/dummy/dummy/orders/FOO/reactivate', {
     }, follow=True)
-    print(response.content.decode())
     assert 'alert-success' in response.content.decode()
     with scopes_disabled():
         o = Order.objects.get(id=env[2].id)
@@ -1079,7 +1079,6 @@ def test_order_mark_paid_forced(client, env):
         'amount': str(o.pending_sum),
         'force': 'on'
     }, follow=True)
-    print(response.content.decode())
     assert 'alert-success' in response.content.decode()
     with scopes_disabled():
         o = Order.objects.get(id=env[2].id)
@@ -1355,7 +1354,7 @@ class OrderChangeTests(SoupTest):
             mtype = self.event.organizer.membership_types.create(name='Week pass', transferable=True, allow_parallel_usage=True)
             self.ticket.require_membership = True
             self.ticket.require_membership_types.add(mtype)
-            self.ticket.admission = True
+            self.ticket.personalized = True
             self.ticket.save()
             customer = self.event.organizer.customers.create(email='john@example.org', is_verified=True)
             self.order.customer = customer
@@ -1366,7 +1365,7 @@ class OrderChangeTests(SoupTest):
                 date_end=self.event.date_from + timedelta(days=1),
                 attendee_name_parts={'_scheme': 'full', 'full_name': 'John Doe'},
             )
-        r = self.client.post('/control/event/{}/{}/orders/{}/change'.format(
+        self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
             'add-TOTAL_FORMS': '0',
@@ -1377,7 +1376,6 @@ class OrderChangeTests(SoupTest):
             'op-{}-used_membership'.format(self.op2.pk): str(m_correct1.pk),
             'op-{}-used_membership'.format(self.op3.pk): str(m_correct1.pk),
         }, follow=True)
-        print(r.content)
         self.op1.refresh_from_db()
         self.order.refresh_from_db()
         assert self.op1.used_membership == m_correct1
@@ -1566,8 +1564,8 @@ def test_check_vatid(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     with scopes_disabled():
         ia = InvoiceAddress.objects.create(order=env[2], is_business=True, vat_id='ATU1234567', country=Country('AT'))
-    with mock.patch('vat_moss.id.validate') as mock_validate:
-        mock_validate.return_value = ('AT', 'AT123456', 'Foo')
+    with mock.patch('pretix.base.services.tax._validate_vat_id_EU') as mock_validate:
+        mock_validate.return_value = 'AT123456'
         response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
         assert 'alert-success' in response.content.decode()
         ia.refresh_from_db()
@@ -1579,8 +1577,8 @@ def test_check_vatid_no_entered(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     with scopes_disabled():
         ia = InvoiceAddress.objects.create(order=env[2], is_business=True, country=Country('AT'))
-    with mock.patch('vat_moss.id.validate') as mock_validate:
-        mock_validate.return_value = ('AT', 'AT123456', 'Foo')
+    with mock.patch('pretix.base.services.tax._validate_vat_id_EU') as mock_validate:
+        mock_validate.return_value = 'AT123456'
         response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
         assert 'alert-danger' in response.content.decode()
         ia.refresh_from_db()
@@ -1592,12 +1590,10 @@ def test_check_vatid_invalid_country(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     with scopes_disabled():
         ia = InvoiceAddress.objects.create(order=env[2], is_business=True, vat_id='ATU1234567', country=Country('FR'))
-    with mock.patch('vat_moss.id.validate') as mock_validate:
-        mock_validate.return_value = ('AT', 'AT123456', 'Foo')
-        response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
-        assert 'alert-danger' in response.content.decode()
-        ia.refresh_from_db()
-        assert not ia.vat_id_validated
+    response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
+    assert 'alert-danger' in response.content.decode()
+    ia.refresh_from_db()
+    assert not ia.vat_id_validated
 
 
 @pytest.mark.django_db
@@ -1605,8 +1601,8 @@ def test_check_vatid_noneu_country(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     with scopes_disabled():
         ia = InvoiceAddress.objects.create(order=env[2], is_business=True, vat_id='CHU1234567', country=Country('CH'))
-    with mock.patch('vat_moss.id.validate') as mock_validate:
-        mock_validate.return_value = ('AT', 'AT123456', 'Foo')
+    with mock.patch('pretix.base.services.tax._validate_vat_id_EU') as mock_validate:
+        mock_validate.return_value = 'AT123456'
         response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
         assert 'alert-danger' in response.content.decode()
         ia.refresh_from_db()
@@ -1618,8 +1614,8 @@ def test_check_vatid_no_country(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     with scopes_disabled():
         ia = InvoiceAddress.objects.create(order=env[2], is_business=True, vat_id='ATU1234567')
-    with mock.patch('vat_moss.id.validate') as mock_validate:
-        mock_validate.return_value = ('AT', 'AT123456', 'Foo')
+    with mock.patch('pretix.base.services.tax._validate_vat_id_EU') as mock_validate:
+        mock_validate.return_value = 'AT123456'
         response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
         assert 'alert-danger' in response.content.decode()
         ia.refresh_from_db()
@@ -1629,8 +1625,8 @@ def test_check_vatid_no_country(client, env):
 @pytest.mark.django_db
 def test_check_vatid_no_invoiceaddress(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
-    with mock.patch('vat_moss.id.validate') as mock_validate:
-        mock_validate.return_value = ('AT', 'AT123456', 'Foo')
+    with mock.patch('pretix.base.services.tax._validate_vat_id_EU') as mock_validate:
+        mock_validate.return_value = 'AT123456'
         response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
         assert 'alert-danger' in response.content.decode()
 
@@ -1640,10 +1636,9 @@ def test_check_vatid_invalid(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     with scopes_disabled():
         ia = InvoiceAddress.objects.create(order=env[2], is_business=True, vat_id='ATU1234567', country=Country('AT'))
-    with mock.patch('vat_moss.id.validate') as mock_validate:
+    with mock.patch('pretix.base.services.tax._validate_vat_id_EU') as mock_validate:
         def raiser(*args, **kwargs):
-            import vat_moss.errors
-            raise vat_moss.errors.InvalidError('Fail')
+            raise VATIDFinalError('Fail')
 
         mock_validate.side_effect = raiser
         response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)
@@ -1657,10 +1652,9 @@ def test_check_vatid_unavailable(client, env):
     client.login(email='dummy@dummy.dummy', password='dummy')
     with scopes_disabled():
         ia = InvoiceAddress.objects.create(order=env[2], is_business=True, vat_id='ATU1234567', country=Country('AT'))
-    with mock.patch('vat_moss.id.validate') as mock_validate:
+    with mock.patch('pretix.base.services.tax._validate_vat_id_EU') as mock_validate:
         def raiser(*args, **kwargs):
-            import vat_moss.errors
-            raise vat_moss.errors.WebServiceUnavailableError('Fail')
+            raise VATIDTemporaryError('Fail')
 
         mock_validate.side_effect = raiser
         response = client.post('/control/event/dummy/dummy/orders/FOO/checkvatid', {}, follow=True)

@@ -93,7 +93,7 @@ def inputfile_factory():
             'D': 'Test',
             'E': 'Baz',
             'F': '0.00',
-            'G': 'AU',
+            'G': 'XK',
             'H': '',
             'I': 'Foo,Bar',
             'J': '2021-06-28 11:00:00',
@@ -677,6 +677,19 @@ def test_import_seat(user, event, item):
     assert not s1.is_available()
     assert not s2.is_available()
     assert not s3.is_available()
+
+
+@pytest.mark.django_db
+@scopes_disabled()
+def test_import_validity(user, event, item):
+    settings = dict(DEFAULT_SETTINGS)
+    settings['item'] = 'static:{}'.format(item.pk)
+    settings['valid_until'] = 'csv:J'
+
+    import_orders.apply(
+        args=(event.pk, inputfile_factory().id, settings, 'en', user.pk)
+    ).get()
+    assert OrderPosition.objects.first().valid_until.isoformat() == '2021-06-28T11:00:00+00:00'
 
 
 @pytest.mark.django_db

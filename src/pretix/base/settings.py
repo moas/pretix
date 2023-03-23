@@ -57,12 +57,14 @@ from django_countries.fields import Country
 from hierarkey.models import GlobalSettingsBase, Hierarkey
 from i18nfield.forms import I18nFormField, I18nTextarea, I18nTextInput
 from i18nfield.strings import LazyI18nString
+from phonenumbers import PhoneNumber, parse
 from rest_framework import serializers
 
 from pretix.api.serializers.fields import (
     ListMultipleChoiceField, UploadedFileField,
 )
-from pretix.api.serializers.i18n import I18nField
+from pretix.api.serializers.i18n import I18nField, I18nURLField
+from pretix.base.forms import I18nURLFormField
 from pretix.base.models.tax import VAT_ID_COUNTRIES, TaxRule
 from pretix.base.reldate import (
     RelativeDateField, RelativeDateTimeField, RelativeDateWrapper,
@@ -145,6 +147,17 @@ DEFAULTS = {
                         "advanced features like memberships.")
         )
     },
+    'customer_accounts_native': {
+        'default': 'True',
+        'type': bool,
+        'form_class': forms.BooleanField,
+        'serializer_class': serializers.BooleanField,
+        'form_kwargs': dict(
+            label=_("Allow customers to log in with email address and password"),
+            help_text=_("If disabled, you will need to connect one or more single-sign-on providers."),
+            widget=forms.CheckboxInput(attrs={'data-display-dependency': '#id_settings-customer_accounts'}),
+        )
+    },
     'customer_accounts_link_by_email': {
         'default': 'False',
         'type': bool,
@@ -183,6 +196,19 @@ DEFAULTS = {
 
         )
     },
+    'hide_prices_from_attendees': {
+        'default': 'True',
+        'type': bool,
+        'form_class': forms.BooleanField,
+        'serializer_class': serializers.BooleanField,
+        'form_kwargs': dict(
+            label=_("Hide prices on attendee ticket page"),
+            help_text=_("If a person buys multiple tickets and you send emails to all of the attendees, with this "
+                        "option the ticket price will not be shown on the ticket page of the individual attendees. "
+                        "The ticket buyer will of course see the price."),
+
+        )
+    },
     'system_question_order': {
         'default': {},
         'type': dict,
@@ -194,7 +220,7 @@ DEFAULTS = {
         'serializer_class': serializers.BooleanField,
         'form_kwargs': dict(
             label=_("Ask for attendee names"),
-            help_text=_("Ask for a name for all tickets which include admission to the event."),
+            help_text=_("Ask for a name for all personalized tickets."),
         )
     },
     'attendee_names_required': {
@@ -217,10 +243,10 @@ DEFAULTS = {
             label=_("Ask for email addresses per ticket"),
             help_text=_("Normally, pretix asks for one email address per order and the order confirmation will be sent "
                         "only to that email address. If you enable this option, the system will additionally ask for "
-                        "individual email addresses for every admission ticket. This might be useful if you want to "
+                        "individual email addresses for every personalized ticket. This might be useful if you want to "
                         "obtain individual addresses for every attendee even in case of group orders. However, "
                         "pretix will send the order confirmation by default only to the one primary email address, not to "
-                        "the per-attendee addresses. You can however enable this in the E-mail settings."),
+                        "the per-attendee addresses. You can however enable this in the email settings."),
         )
     },
     'attendee_emails_required': {
@@ -230,7 +256,7 @@ DEFAULTS = {
         'serializer_class': serializers.BooleanField,
         'form_kwargs': dict(
             label=_("Require email addresses per ticket"),
-            help_text=_("Require customers to fill in individual e-mail addresses for all admission tickets. See the "
+            help_text=_("Require customers to fill in individual email addresses for all personalized tickets. See the "
                         "above option for more details. One email address for the order confirmation will always be "
                         "required regardless of this setting."),
             widget=forms.CheckboxInput(attrs={'data-checkbox-dependency': '#id_settings-attendee_emails_asked'}),
@@ -352,13 +378,27 @@ DEFAULTS = {
     },
     'invoice_eu_currencies': {
         'default': 'True',
-        'type': bool,
-        'form_class': forms.BooleanField,
-        'serializer_class': serializers.BooleanField,
+        'type': str,
+        'form_class': forms.ChoiceField,
+        'serializer_class': serializers.ChoiceField,
         'form_kwargs': dict(
-            label=_("On invoices from one EU country into another EU country with a different currency, print the "
-                    "tax amounts in both currencies if possible"),
-        )
+            label=_("Show exchange rates"),
+            widget=forms.RadioSelect,
+            choices=(
+                ('False', _('Never')),
+                ('True', _('Based on European Central Bank daily rates, whenever the invoice recipient is in an EU '
+                           'country that uses a different currency.')),
+                ('CZK', _('Based on Czech National Bank daily rates, whenever the invoice amount is not in CZK.')),
+            ),
+        ),
+        'serializer_kwargs': dict(
+            choices=(
+                ('False', _('Never')),
+                ('True', _('Based on European Central Bank daily rates, whenever the invoice recipient is in an EU '
+                           'country that uses a different currency.')),
+                ('CZK', _('Based on Czech National Bank daily rates, whenever the invoice amount is not in CZK.')),
+            ),
+        ),
     },
     'invoice_address_required': {
         'default': 'False',
@@ -730,6 +770,18 @@ DEFAULTS = {
     'payment_giftcard__enabled': {
         'default': 'True',
         'type': bool
+    },
+    'payment_giftcard_public_name': {
+        'default': LazyI18nString.from_gettext(gettext_noop('Gift card')),
+        'type': LazyI18nString
+    },
+    'payment_giftcard_public_description': {
+        'default': LazyI18nString.from_gettext(gettext_noop(
+            'If you have a gift card, please enter the gift card code here. If the gift card does not have '
+            'enough credit to pay for the full order, you will be shown this page again and you can either '
+            'redeem another gift card or select a different payment method for the difference.'
+        )),
+        'type': LazyI18nString
     },
     'payment_resellers__restrict_to_sales_channels': {
         'default': ['resellers'],
@@ -1284,6 +1336,25 @@ DEFAULTS = {
                         "the email. Does not affect orders performed through other sales channels."),
         )
     },
+    'low_availability_percentage': {
+        'default': None,
+        'type': int,
+        'serializer_class': serializers.IntegerField,
+        'form_class': forms.IntegerField,
+        'serializer_kwargs': dict(
+            min_value=0,
+            max_value=100,
+        ),
+        'form_kwargs': dict(
+            label=_('Low availability threshold'),
+            help_text=_('If the availability of tickets falls below this percentage, the event (or a date, if it is an '
+                        'event series) will be highlighted to have low availability in the event list or calendar. If '
+                        'you keep this option empty, low availability will not be shown publicly.'),
+            min_value=0,
+            max_value=100,
+            required=False
+        )
+    },
     'event_list_availability': {
         'default': 'True',
         'type': bool,
@@ -1326,6 +1397,19 @@ DEFAULTS = {
         'serializer_class': serializers.BooleanField,
         'form_kwargs': dict(
             label=_("Hide all unavailable dates from calendar or list views"),
+            help_text=_("This option currently only affects the calendar of this event series, not the organizer-wide "
+                        "calendar.")
+        )
+    },
+    'event_calendar_future_only': {
+        'default': 'False',
+        'type': bool,
+        'form_class': forms.BooleanField,
+        'serializer_class': serializers.BooleanField,
+        'form_kwargs': dict(
+            label=_("Hide all past dates from calendar"),
+            help_text=_("This option currently only affects the calendar of this event series, not the organizer-wide "
+                        "calendar.")
         )
     },
     'allow_modifications_after_checkin': {
@@ -1400,6 +1484,32 @@ DEFAULTS = {
             label=_("Do not allow changes after"),
         )
     },
+    'change_allow_user_if_checked_in': {
+        'default': 'False',
+        'type': bool,
+        'form_class': forms.BooleanField,
+        'serializer_class': serializers.BooleanField,
+        'form_kwargs': dict(
+            label=_("Allow change even though the ticket has already been checked in"),
+            help_text=_("By default, order changes are disabled after any ticket in the order has been checked in. "
+                        "If you check this box, this requirement is lifted. It is still not possible to remove an "
+                        "add-on product that has already been checked in individually. Use with care, and preferably "
+                        "only in combination with a limitation on price changes above."),
+        )
+    },
+    'change_allow_attendee': {
+        'default': 'False',
+        'type': bool,
+        'form_class': forms.BooleanField,
+        'serializer_class': serializers.BooleanField,
+        'form_kwargs': dict(
+            label=_("Allow individual attendees to change their ticket"),
+            help_text=_("By default, only the person who ordered the tickets can make any changes. If you check this "
+                        "box, individual attendees can also make changes. However, individual attendees can always "
+                        "only make changes that do not change the total price of the order. Such changes can always "
+                        "only be made by the main customer."),
+        )
+    },
     'cancel_allow_user': {
         'default': 'True',
         'type': bool,
@@ -1407,6 +1517,45 @@ DEFAULTS = {
         'serializer_class': serializers.BooleanField,
         'form_kwargs': dict(
             label=_("Customers can cancel their unpaid orders"),
+        )
+    },
+    'cancel_allow_user_unpaid_keep': {
+        'default': '0.00',
+        'type': Decimal,
+        'form_class': forms.DecimalField,
+        'serializer_class': serializers.DecimalField,
+        'serializer_kwargs': dict(
+            max_digits=13, decimal_places=2
+        ),
+        'form_kwargs': dict(
+            label=_("Charge a fixed cancellation fee"),
+            help_text=_("Only affects orders pending payments, a cancellation fee for free orders is never charged. "
+                        "Note that it will be your responsibility to claim the cancellation fee from the user."),
+        )
+    },
+    'cancel_allow_user_unpaid_keep_fees': {
+        'default': 'False',
+        'type': bool,
+        'form_class': forms.BooleanField,
+        'serializer_class': serializers.BooleanField,
+        'form_kwargs': dict(
+            label=_("Charge payment, shipping and service fees"),
+            help_text=_("Only affects orders pending payments, a cancellation fee for free orders is never charged. "
+                        "Note that it will be your responsibility to claim the cancellation fee from the user."),
+        )
+    },
+    'cancel_allow_user_unpaid_keep_percentage': {
+        'default': '0.00',
+        'type': Decimal,
+        'form_class': forms.DecimalField,
+        'serializer_class': serializers.DecimalField,
+        'serializer_kwargs': dict(
+            max_digits=13, decimal_places=2
+        ),
+        'form_kwargs': dict(
+            label=_("Charge a percentual cancellation fee"),
+            help_text=_("Only affects orders pending payments, a cancellation fee for free orders is never charged. "
+                        "Note that it will be your responsibility to claim the cancellation fee from the user."),
         )
     },
     'cancel_allow_user_until': {
@@ -1435,7 +1584,7 @@ DEFAULTS = {
         'form_class': forms.DecimalField,
         'serializer_class': serializers.DecimalField,
         'serializer_kwargs': dict(
-            max_digits=10, decimal_places=2
+            max_digits=13, decimal_places=2
         ),
         'form_kwargs': dict(
             label=_("Keep a fixed cancellation fee"),
@@ -1456,7 +1605,7 @@ DEFAULTS = {
         'form_class': forms.DecimalField,
         'serializer_class': serializers.DecimalField,
         'serializer_kwargs': dict(
-            max_digits=10, decimal_places=2
+            max_digits=13, decimal_places=2
         ),
         'form_kwargs': dict(
             label=_("Keep a percentual cancellation fee"),
@@ -1495,10 +1644,10 @@ DEFAULTS = {
         'form_class': forms.DecimalField,
         'serializer_class': serializers.DecimalField,
         'serializer_kwargs': dict(
-            max_digits=10, decimal_places=2
+            max_digits=13, decimal_places=2
         ),
         'form_kwargs': dict(
-            max_digits=10, decimal_places=2,
+            max_digits=13, decimal_places=2,
             label=_("Step size for reduction amount"),
             help_text=_('By default, customers can choose an arbitrary amount for you to keep. If you set this to e.g. '
                         '10, they will only be able to choose values in increments of 10.')
@@ -1512,6 +1661,15 @@ DEFAULTS = {
         'form_kwargs': dict(
             label=_("Customers can only request a cancellation that needs to be approved by the event organizer "
                     "before the order is canceled and a refund is issued."),
+        )
+    },
+    'cancel_allow_user_paid_require_approval_fee_unknown': {
+        'default': 'False',
+        'type': bool,
+        'form_class': forms.BooleanField,
+        'serializer_class': serializers.BooleanField,
+        'form_kwargs': dict(
+            label=_("Do not show the cancellation fee to users when they request cancellation."),
         )
     },
     'cancel_allow_user_paid_refund_as_giftcard': {
@@ -1571,14 +1729,15 @@ DEFAULTS = {
     },
     'privacy_url': {
         'default': None,
-        'type': str,
-        'form_class': forms.URLField,
+        'type': LazyI18nString,
+        'form_class': I18nURLFormField,
         'form_kwargs': dict(
             label=_("Privacy Policy URL"),
             help_text=_("This should point e.g. to a part of your website that explains how you use data gathered in "
                         "your ticket shop."),
+            widget=I18nTextInput,
         ),
-        'serializer_class': serializers.URLField,
+        'serializer_class': I18nURLField,
     },
     'confirm_texts': {
         'default': LazyI18nStringList(),
@@ -1687,6 +1846,14 @@ DEFAULTS = {
         'type': LazyI18nString,
         'default': ""
     },
+    'mail_subject_resend_link': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your order: {code}")),
+    },
+    'mail_subject_resend_link_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your event registration: {code}")),
+    },
     'mail_text_resend_link': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
@@ -1700,6 +1867,10 @@ You can change your order details and view the status of your order at
 Best regards,
 Your {event} team"""))
     },
+    'mail_subject_resend_all_links': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your orders for {event}")),
+    },
     'mail_text_resend_all_links': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
@@ -1712,6 +1883,10 @@ The list is as follows:
 Best regards,
 Your {event} team"""))
     },
+    'mail_subject_order_free_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your event registration: {code}")),
+    },
     'mail_text_order_free_attendee': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello {attendee_name},
@@ -1723,6 +1898,14 @@ You can view the details and status of your ticket here:
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_send_order_free_attendee': {
+        'type': bool,
+        'default': 'False'
+    },
+    'mail_subject_order_free': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your order: {code}")),
     },
     'mail_text_order_free': {
         'type': LazyI18nString,
@@ -1737,9 +1920,9 @@ You can change your order details and view the status of your order at
 Best regards,
 Your {event} team"""))
     },
-    'mail_send_order_free_attendee': {
-        'type': bool,
-        'default': 'False'
+    'mail_subject_order_placed_require_approval': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your order: {code}")),
     },
     'mail_text_order_placed_require_approval': {
         'type': LazyI18nString,
@@ -1754,6 +1937,10 @@ You can change your order details and view the status of your order at
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_subject_order_placed': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your order: {code}")),
     },
     'mail_text_order_placed': {
         'type': LazyI18nString,
@@ -1798,6 +1985,10 @@ Your {event} team"""))
         'type': bool,
         'default': 'False'
     },
+    'mail_subject_order_placed_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your event registration: {code}")),
+    },
     'mail_text_order_placed_attendee': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello {attendee_name},
@@ -1810,6 +2001,10 @@ You can view the details and status of your ticket here:
 Best regards,
 Your {event} team"""))
     },
+    'mail_subject_order_changed': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your order has been changed: {code}")),
+    },
     'mail_text_order_changed': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
@@ -1821,6 +2016,10 @@ You can view the status of your order at
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_subject_order_paid': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Payment received for your order: {code}")),
     },
     'mail_text_order_paid': {
         'type': LazyI18nString,
@@ -1839,6 +2038,10 @@ Your {event} team"""))
     'mail_send_order_paid_attendee': {
         'type': bool,
         'default': 'False'
+    },
+    'mail_subject_order_paid_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Event registration confirmed: {code}")),
     },
     'mail_text_order_paid_attendee': {
         'type': LazyI18nString,
@@ -1867,6 +2070,10 @@ Your {event} team"""))
         'type': int,
         'default': '3'
     },
+    'mail_subject_order_expire_warning': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your order is about to expire: {code}")),
+    },
     'mail_text_order_expire_warning': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
@@ -1880,6 +2087,47 @@ You can view the payment information and the status of your order at
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_subject_order_pending_warning': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your order is pending payment: {code}")),
+    },
+    'mail_text_order_pending_warning': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
+
+we did not yet receive a full payment for your order for {event}.
+Please keep in mind that you are required to pay before {expire_date}.
+
+You can view the payment information and the status of your order at
+{url}
+
+Best regards,
+Your {event} team"""))
+    },
+    'mail_subject_order_incomplete_payment': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Incomplete payment received: {code}")),
+    },
+    'mail_text_order_incomplete_payment': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
+
+we received a payment for your order for {event}.
+
+Unfortunately, the received amount is less than the full amount
+required. Your order is therefore still considered unpaid, as it is
+missing additional payment of **{pending_sum}**.
+
+You can view the payment information and the status of your order at
+{url}
+
+Best regards,
+Your {event} team"""))
+    },
+    'mail_subject_waiting_list': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("You have been selected from the waitinglist for {event}")),
     },
     'mail_text_waiting_list': {
         'type': LazyI18nString,
@@ -1910,6 +2158,10 @@ as possible to the next person on the waiting list:
 Best regards,
 Your {event} team"""))
     },
+    'mail_subject_order_canceled': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Order canceled: {code}")),
+    },
     'mail_text_order_canceled': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
@@ -1923,6 +2175,10 @@ You can view the details of your order at
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_subject_order_approved': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Order approved and awaiting payment: {code}")),
     },
     'mail_text_order_approved': {
         'type': LazyI18nString,
@@ -1940,6 +2196,10 @@ You can select a payment method and perform the payment here:
 Best regards,
 Your {event} team"""))
     },
+    'mail_subject_order_approved_free': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Order approved and confirmed: {code}")),
+    },
     'mail_text_order_approved_free': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
@@ -1952,6 +2212,10 @@ You can change your order details and view the status of your order at
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_subject_order_denied': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Order denied: {code}")),
     },
     'mail_text_order_denied': {
         'type': LazyI18nString,
@@ -1986,6 +2250,10 @@ Your {event} team"""))
         'type': bool,
         'default': 'False'
     },
+    'mail_subject_download_reminder_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your ticket is ready for download: {code}")),
+    },
     'mail_text_download_reminder_attendee': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello {attendee_name},
@@ -1998,6 +2266,10 @@ Your {event} team"""))
     Best regards,
     Your {event} team"""))
     },
+    'mail_subject_download_reminder': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Your ticket is ready for download: {code}")),
+    },
     'mail_text_download_reminder': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello,
@@ -2009,6 +2281,10 @@ If you did not do so already, you can download your ticket here:
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_subject_customer_registration': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Activate your account at {organizer}")),
     },
     'mail_text_customer_registration': {
         'type': LazyI18nString,
@@ -2028,6 +2304,10 @@ Best regards,
 
 Your {organizer} team"""))
     },
+    'mail_subject_customer_email_change': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Confirm email address for your account at {organizer}")),
+    },
     'mail_text_customer_email_change': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(gettext_noop("""Hello {name},
@@ -2045,6 +2325,10 @@ If you did not request this, please ignore this email.
 Best regards,
 
 Your {organizer} team"""))
+    },
+    'mail_subject_customer_reset': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(gettext_noop("Set a new password for your account at {organizer}")),
     },
     'mail_text_customer_reset': {
         'type': LazyI18nString,
@@ -2410,7 +2694,7 @@ Your {organizer} team"""))
             label=_("Attendee data explanation"),
             widget=I18nTextarea,
             widget_kwargs={'attrs': {'rows': '2'}},
-            help_text=_("This text will be shown above the questions asked for every admission product. You can use it e.g. to explain "
+            help_text=_("This text will be shown above the questions asked for every personalized product. You can use it e.g. to explain "
                         "why you need information from them.")
         )
     },
@@ -2585,7 +2869,9 @@ Your {organizer} team"""))
     },
     'name_scheme': {
         'default': 'full',  # default for new events is 'given_family'
-        'type': str
+        'type': str,
+        'serializer_class': serializers.ChoiceField,
+        'serializer_kwargs': {},
     },
     'giftcard_length': {
         'default': settings.ENTROPY['giftcard_secret'],
@@ -2733,6 +3019,11 @@ PERSON_NAME_TITLE_GROUPS = OrderedDict([
         'Dr.',
         'Prof.',
         'Prof. Dr.',
+    ))),
+    ('dr_prof_he', ('Dr., Prof., H.E.', (
+        'Dr.',
+        'Prof.',
+        'H.E.',
     )))
 ])
 
@@ -2758,6 +3049,13 @@ def concatenation_for_salutation(d):
         given_name = None
 
     return " ".join(filter(None, (salutation, title, given_name, family_name)))
+
+
+def get_name_parts_localized(name_parts, key):
+    value = name_parts.get(key, "")
+    if key == "salutation":
+        return pgettext_lazy("person_name_salutation", value)
+    return value
 
 
 PERSON_NAME_SCHEMES = OrderedDict([
@@ -2980,6 +3278,9 @@ PERSON_NAME_SCHEMES = OrderedDict([
         },
     }),
 ])
+
+DEFAULTS['name_scheme']['serializer_kwargs']['choices'] = ((k, k) for k in PERSON_NAME_SCHEMES)
+
 COUNTRIES_WITH_STATE_IN_ADDRESS = {
     # Source: http://www.bitboost.com/ref/international-address-formats.html
     # This is not a list of countries that *have* states, this is a list of countries where states
@@ -2990,7 +3291,7 @@ COUNTRIES_WITH_STATE_IN_ADDRESS = {
     'CA': (['Province', 'Territory'], 'short'),
     # 'CN': (['Province', 'Autonomous region', 'Munincipality'], 'long'),
     'MY': (['State'], 'long'),
-    'MX': (['State', 'Federal District'], 'short'),
+    'MX': (['State', 'Federal district'], 'short'),
     'US': (['State', 'Outlying area', 'District'], 'short'),
 }
 
@@ -3016,6 +3317,7 @@ settings_hierarkey.add_type(LazyI18nStringList,
 settings_hierarkey.add_type(RelativeDateWrapper,
                             serialize=lambda rdw: rdw.to_string(),
                             unserialize=lambda s: RelativeDateWrapper.from_string(s))
+settings_hierarkey.add_type(PhoneNumber, lambda pn: pn.as_international, lambda s: parse(s) if s else None)
 
 
 @settings_hierarkey.set_global(cache_namespace='global')

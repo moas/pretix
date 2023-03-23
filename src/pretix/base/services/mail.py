@@ -63,6 +63,7 @@ from django.utils.timezone import now, override
 from django.utils.translation import gettext as _, pgettext
 from django_scopes import scope, scopes_disabled
 from i18nfield.strings import LazyI18nString
+from text_unidecode import unidecode
 
 from pretix.base.email import ClassicMailRenderer
 from pretix.base.i18n import language
@@ -75,6 +76,7 @@ from pretix.base.services.tasks import TransactionAwareTask
 from pretix.base.services.tickets import get_tickets_for_order
 from pretix.base.signals import email_filter, global_email_filter
 from pretix.celery_app import app
+from pretix.helpers.format import format_map
 from pretix.helpers.hierarkey import clean_filename
 from pretix.multidomain.urlreverse import build_absolute_uri
 from pretix.presale.ical import get_private_icals
@@ -97,7 +99,8 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
          context: Dict[str, Any] = None, event: Event = None, locale: str = None, order: Order = None,
          position: OrderPosition = None, *, headers: dict = None, sender: str = None, organizer: Organizer = None,
          customer: Customer = None, invoices: Sequence = None, attach_tickets=False, auto_email=True, user=None,
-         attach_ical=False, attach_cached_files: Sequence = None, attach_other_files: list=None):
+         attach_ical=False, attach_cached_files: Sequence = None, attach_other_files: list=None,
+         plain_text_only=False, no_order_links=False, cc: Sequence[str]=None, bcc: Sequence[str]=None):
     """
     Sends out an email to a user. The mail will be sent synchronously or asynchronously depending on the installation.
 
@@ -108,7 +111,7 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
 
     :param template: The filename of a template to be used. It will be rendered with the locale given in the locale
         argument and the context given in the next argument. Alternatively, you can pass a LazyI18nString and
-        ``context`` will be used as the argument to a  Python ``.format_map()`` call on the template.
+        ``context`` will be used as the argument to a ``pretix.helpers.format.format_map(template, context)`` call on the template.
 
     :param context: The context for rendering the template (see ``template`` parameter)
 
@@ -121,7 +124,7 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
     :param order: The order this email is related to (optional). If set, this will be used to include a link to the
         order below the email.
 
-    :param order: The order position this email is related to (optional). If set, this will be used to include a link
+    :param position: The order position this email is related to (optional). If set, this will be used to include a link
         to the order position instead of the order below the email.
 
     :param headers: A dict of custom mail headers to add to the mail
@@ -141,17 +144,26 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
 
     :param user: The user this email is sent to
 
-    :param customer: The user this email is sent to
+    :param customer: The customer this email is sent to
 
     :param attach_cached_files: A list of cached file to attach to this email.
 
     :param attach_other_files: A list of file paths on our storage to attach.
+
+    :param plain_text_only: If set to ``True``, rendering a HTML version will be skipped.
+
+    :param no_order_links: If set to ``True``, no link to the order confirmation page will be auto-appended. Currently
+                           only allowed to use together with ``plain_text_only`` since HTML renderers add their own
+                           links.
 
     :raises MailOrderException: on obvious, immediate failures. Not raising an exception does not necessarily mean
         that the email has been sent, just that it has been queued by the email backend.
     """
     if email == INVALID_ADDRESS:
         return
+
+    if no_order_links and not plain_text_only:
+        raise ValueError('If you set no_order_links, you also need to set plain_text_only.')
 
     headers = headers or {}
     if auto_email:
@@ -196,10 +208,10 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
         else:
             sender = formataddr((settings.PRETIX_INSTANCE_NAME, sender))
 
-        subject = raw_subject = str(subject)
+        subject = raw_subject = str(subject).replace('\n', ' ').replace('\r', '')[:900]
         signature = ""
 
-        bcc = []
+        bcc = list(bcc or [])
 
         settings_holder = event or organizer
 
@@ -241,7 +253,7 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
             if order and order.testmode:
                 subject = "[TESTMODE] " + subject
 
-            if order and position:
+            if order and position and not no_order_links:
                 body_plain += _(
                     "You are receiving this email because someone placed an order for {event} for you."
                 ).format(event=event.name)
@@ -257,7 +269,7 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
                         }
                     )
                 )
-            elif order:
+            elif order and not no_order_links:
                 body_plain += _(
                     "You are receiving this email because you placed an order for {event}."
                 ).format(event=event.name)
@@ -277,7 +289,9 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
 
         with override(timezone):
             try:
-                if 'position' in inspect.signature(renderer.render).parameters:
+                if plain_text_only:
+                    body_html = None
+                elif 'position' in inspect.signature(renderer.render).parameters:
                     body_html = renderer.render(content_plain, signature, raw_subject, order, position)
                 else:
                     # Backwards compatibility
@@ -291,6 +305,7 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
 
         send_task = mail_send_task.si(
             to=[email] if isinstance(email, str) else list(email),
+            cc=cc,
             bcc=bcc,
             subject=subject,
             body=body_plain,
@@ -343,11 +358,11 @@ class CustomEmail(EmailMultiAlternatives):
 
 @app.task(base=TransactionAwareTask, bind=True, acks_late=True)
 def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: str, sender: str,
-                   event: int = None, position: int = None, headers: dict = None, bcc: List[str] = None,
+                   event: int = None, position: int = None, headers: dict = None, cc: List[str] = None, bcc: List[str] = None,
                    invoices: List[int] = None, order: int = None, attach_tickets=False, user=None,
                    organizer=None, customer=None, attach_ical=False, attach_cached_files: List[int] = None,
                    attach_other_files: List[str] = None) -> bool:
-    email = CustomEmail(subject, body, sender, to=to, bcc=bcc, headers=headers)
+    email = CustomEmail(subject, body, sender, to=to, cc=cc, bcc=bcc, headers=headers)
     if html is not None:
         html_message = SafeMIMEMultipart(_subtype='related', encoding=settings.DEFAULT_CHARSET)
         html_with_cid, cid_images = replace_images_with_cid_paths(html)
@@ -412,8 +427,9 @@ def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: st
                                         logger.exception('Could not attach invoice to email')
                                         pass
 
-                            if attach_size < settings.FILE_UPLOAD_MAX_SIZE_EMAIL_ATTACHMENT:
-                                # Do not attach more than 4MB, it will bounce way to often.
+                            if attach_size < settings.FILE_UPLOAD_MAX_SIZE_EMAIL_ATTACHMENT - 1:
+                                # Do not attach more than (limit - 1 MB) in tickets (1MB space for invoice, email itself, …),
+                                # it will bounce way to often.
                                 for a in args:
                                     try:
                                         email.attach(*a)
@@ -430,8 +446,9 @@ def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: st
                                     }
                                 )
                         if attach_ical:
+                            fname = re.sub('[^a-zA-Z0-9 ]', '-', unidecode(pgettext('attachment_filename', 'Calendar invite')))
                             for i, cal in enumerate(get_private_icals(event, [position] if position else order.positions.all())):
-                                email.attach('event-{}.ics'.format(i), cal.serialize(), 'text/calendar')
+                                email.attach('{}{}.ics'.format(fname, f'-{i + 1}' if i > 0 else ''), cal.serialize(), 'text/calendar')
 
             email = email_filter.send_chained(event, 'message', message=email, order=order, user=user)
 
@@ -501,11 +518,11 @@ def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: st
                     rc.expire(redis_key, 300)
 
                     max_retries = 10
-                    retry_after = 30 + cnt * 10
+                    retry_after = min(30 + cnt * 10, 1800)
                 else:
                     # Most likely some other kind of temporary failure, retry again (but pretty soon)
                     max_retries = 5
-                    retry_after = 2 ** (self.request.retries * 3)  # max is 2 ** (4*3) = 4096 seconds = 68 minutes
+                    retry_after = [10, 30, 60, 300, 900, 900][self.request.retries]
 
                 try:
                     self.retry(max_retries=max_retries, countdown=retry_after)
@@ -541,7 +558,7 @@ def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: st
             if not any(c >= 500 for c in smtp_codes):
                 # Not a permanent failure (mailbox full, service unavailable), retry later, but with large intervals
                 try:
-                    self.retry(max_retries=5, countdown=2 ** (self.request.retries * 3) * 4)  # max is 2 ** (4*3) * 4 = 16384 seconds = approx 4.5 hours
+                    self.retry(max_retries=5, countdown=[60, 300, 600, 1200, 1800, 1800][self.request.retries])
                 except MaxRetriesExceededError:
                     # ignore and go on with logging the error
                     pass
@@ -566,7 +583,7 @@ def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: st
         except Exception as e:
             if isinstance(e, (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, ssl.SSLError, OSError)):
                 try:
-                    self.retry(max_retries=5, countdown=2 ** (self.request.retries * 3))  # max is 2 ** (4*3) = 4096 seconds = 68 minutes
+                    self.retry(max_retries=5, countdown=[10, 30, 60, 300, 900, 900][self.request.retries])
                 except MaxRetriesExceededError:
                     if log_target:
                         log_target.log_action(
@@ -605,7 +622,7 @@ def render_mail(template, context):
     if isinstance(template, LazyI18nString):
         body = str(template)
         if context:
-            body = body.format_map(TolerantDict(context))
+            body = format_map(body, context)
     else:
         tpl = get_template(template)
         body = tpl.render(context)

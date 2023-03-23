@@ -130,6 +130,7 @@ DATABASES = {
         'HOST': config.get('database', 'host', fallback=''),
         'PORT': config.get('database', 'port', fallback=''),
         'CONN_MAX_AGE': 0 if db_backend == 'sqlite3' else 120,
+        'CONN_HEALTH_CHECKS': db_backend != 'sqlite3',  # Will only be used from Django 4.1 onwards
         'OPTIONS': db_options,
         'TEST': {
             'CHARSET': 'utf8mb4',
@@ -170,13 +171,17 @@ PRETIX_SESSION_TIMEOUT_RELATIVE = 3600 * 3
 PRETIX_SESSION_TIMEOUT_ABSOLUTE = 3600 * 12
 PRETIX_PRIMARY_COLOR = '#8E44B3'
 
-SITE_URL = config.get('pretix', 'url', fallback='http://localhost')
+SITE_URL = config.get('pretix', 'url', fallback='http://localhost:8000')
 if SITE_URL.endswith('/'):
     SITE_URL = SITE_URL[:-1]
 
 CSRF_TRUSTED_ORIGINS = [urlparse(SITE_URL).hostname]
 
 TRUST_X_FORWARDED_FOR = config.get('pretix', 'trust_x_forwarded_for', fallback=False)
+USE_X_FORWARDED_HOST = config.get('pretix', 'trust_x_forwarded_host', fallback=False)
+
+
+REQUEST_ID_HEADER = config.get('pretix', 'request_id_header', fallback=False)
 
 if config.get('pretix', 'trust_x_forwarded_proto', fallback=False):
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -219,7 +224,7 @@ MAIL_FROM_NOTIFICATIONS = config.get('mail', 'from_notifications', fallback=MAIL
 MAIL_FROM_ORGANIZERS = config.get('mail', 'from_organizers', fallback=MAIL_FROM)
 MAIL_CUSTOM_SENDER_VERIFICATION_REQUIRED = config.getboolean('mail', 'custom_sender_verification_required', fallback=True)
 MAIL_CUSTOM_SENDER_SPF_STRING = config.get('mail', 'custom_sender_spf_string', fallback='')
-MAIL_CUSTOM_SMTP_ALLOW_PRIVATE_NETWORKS = config.getboolean('mail', 'custom_smtp_allow_private_networks', fallback=False)
+MAIL_CUSTOM_SMTP_ALLOW_PRIVATE_NETWORKS = config.getboolean('mail', 'custom_smtp_allow_private_networks', fallback=DEBUG)
 EMAIL_HOST = config.get('mail', 'host', fallback='localhost')
 EMAIL_PORT = config.getint('mail', 'port', fallback=25)
 EMAIL_HOST_USER = config.get('mail', 'user', fallback='')
@@ -356,6 +361,7 @@ INSTALLED_APPS = [
     'pretix.plugins.banktransfer',
     'pretix.plugins.stripe',
     'pretix.plugins.paypal',
+    'pretix.plugins.paypal2',
     'pretix.plugins.ticketoutputpdf',
     'pretix.plugins.sendmail',
     'pretix.plugins.statistics',
@@ -374,6 +380,7 @@ INSTALLED_APPS = [
     'django_countries',
     'hijack',
     'oauth2_provider',
+    'localflavor',
     'phonenumber_field'
 ]
 
@@ -438,6 +445,7 @@ CORE_MODULES = {
 }
 
 MIDDLEWARE = [
+    'pretix.helpers.logs.RequestIdMiddleware',
     'pretix.api.middleware.IdempotencyMiddleware',
     'pretix.multidomain.middlewares.MultiDomainMiddleware',
     'pretix.base.middleware.CustomCommonMiddleware',
@@ -527,12 +535,13 @@ ALL_LANGUAGES = [
     ('ru', _('Russian')),
     ('es', _('Spanish')),
     ('tr', _('Turkish')),
+    ('uk', _('Ukrainian')),
 ]
 LANGUAGES_OFFICIAL = {
     'en', 'de', 'de-informal'
 }
 LANGUAGES_INCUBATING = {
-    'pl', 'fi', 'pt-br', 'gl', 'cs'
+    'pl', 'fi', 'pt-br', 'gl',
 } - set(config.get('languages', 'allow_incubating', fallback='').split(','))
 LANGUAGES_RTL = {
     'ar', 'hw'
@@ -592,7 +601,7 @@ CSRF_FAILURE_VIEW = 'pretix.base.views.errors.csrf_failure'
 
 template_loaders = (
     'django.template.loaders.filesystem.Loader',
-    'django.template.loaders.app_directories.Loader',
+    'pretix.helpers.template_loaders.AppLoader',
 )
 if not DEBUG:
     template_loaders = (
@@ -647,6 +656,10 @@ COMPRESS_PRECOMPILERS = (
     ('text/vue', 'pretix.helpers.compressor.VueCompiler'),
 )
 
+COMPRESS_OFFLINE_CONTEXT = {
+    'basetpl': 'empty.html',
+}
+
 COMPRESS_ENABLED = COMPRESS_OFFLINE = not debug_fallback
 
 COMPRESS_FILTERS = {
@@ -654,7 +667,10 @@ COMPRESS_FILTERS = {
         # CssAbsoluteFilter is incredibly slow, especially when dealing with our _flags.scss
         # However, we don't need it if we consequently use the static() function in Sass
         # 'compressor.filters.css_default.CssAbsoluteFilter',
-        'compressor.filters.cssmin.CSSCompressorFilter',
+        'compressor.filters.cssmin.rCSSMinFilter',
+    ),
+    'js': (
+        'compressor.filters.jsmin.JSMinFilter',
     )
 }
 
@@ -675,31 +691,41 @@ LOGGING = {
     'disable_existing_loggers': False,
     'formatters': {
         'default': {
-            'format': '%(levelname)s %(asctime)s %(name)s %(module)s %(message)s'
+            'format': (
+                '%(levelname)s %(asctime)s RequestId=%(request_id)s %(name)s %(module)s %(message)s'
+                if REQUEST_ID_HEADER
+                else '%(levelname)s %(asctime)s %(name)s %(module)s %(message)s'
+            )
         },
     },
     'filters': {
         'require_admin_enabled': {
             '()': 'pretix.helpers.logs.AdminExistsFilter',
-        }
+        },
+        'request_id': {
+            '()': 'pretix.helpers.logs.RequestIdFilter'
+        },
     },
     'handlers': {
         'console': {
             'level': loglevel,
             'class': 'logging.StreamHandler',
-            'formatter': 'default'
+            'formatter': 'default',
+            'filters': ['request_id'],
         },
         'csp_file': {
             'level': loglevel,
             'class': 'logging.FileHandler',
             'filename': os.path.join(LOG_DIR, 'csp.log'),
-            'formatter': 'default'
+            'formatter': 'default',
+            'filters': ['request_id'],
         },
         'file': {
             'level': loglevel,
             'class': 'logging.FileHandler',
             'filename': os.path.join(LOG_DIR, 'pretix.log'),
-            'formatter': 'default'
+            'formatter': 'default',
+            'filters': ['request_id'],
         },
         'mail_admins': {
             'level': 'ERROR',
@@ -780,6 +806,7 @@ if config.has_option('sentry', 'dsn') and not any(c in sys.argv for c in ('shell
         environment=urlparse(SITE_URL).netloc,
         release=__version__,
         send_default_pii=False,
+        propagate_traces=False,  # see https://github.com/getsentry/sentry-python/issues/1717
     )
     ignore_logger('pretix.base.tasks')
     ignore_logger('django.security.DisallowedHost')
@@ -797,6 +824,8 @@ CELERY_TASK_QUEUES = (
 )
 CELERY_TASK_ROUTES = ([
     ('pretix.base.services.cart.*', {'queue': 'checkout'}),
+    ('pretix.base.services.export.scheduled_organizer_export', {'queue': 'background'}),
+    ('pretix.base.services.export.scheduled_event_export', {'queue': 'background'}),
     ('pretix.base.services.orders.*', {'queue': 'checkout'}),
     ('pretix.base.services.mail.*', {'queue': 'mail'}),
     ('pretix.base.services.update_check.*', {'queue': 'background'}),
@@ -837,6 +866,7 @@ AUTH_PASSWORD_VALIDATORS = [
 OAUTH2_PROVIDER_APPLICATION_MODEL = 'pretixapi.OAuthApplication'
 OAUTH2_PROVIDER_GRANT_MODEL = 'pretixapi.OAuthGrant'
 OAUTH2_PROVIDER_ACCESS_TOKEN_MODEL = 'pretixapi.OAuthAccessToken'
+OAUTH2_PROVIDER_ID_TOKEN_MODEL = 'pretixapi.OAuthIDToken'
 OAUTH2_PROVIDER_REFRESH_TOKEN_MODEL = 'pretixapi.OAuthRefreshToken'
 OAUTH2_PROVIDER = {
     'SCOPES': {
@@ -848,7 +878,8 @@ OAUTH2_PROVIDER = {
     'ALLOWED_REDIRECT_URI_SCHEMES': ['https'] if not DEBUG else ['http', 'https'],
     'ACCESS_TOKEN_EXPIRE_SECONDS': 3600 * 24,
     'ROTATE_REFRESH_TOKEN': False,
-
+    'PKCE_REQUIRED': False,
+    'OIDC_RESPONSE_TYPES_SUPPORTED': ["code"],  # We don't support proper OIDC for now
 }
 
 COUNTRIES_OVERRIDE = {
@@ -861,7 +892,7 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 MB
 # File sizes are in MiB
 FILE_UPLOAD_MAX_SIZE_IMAGE = 1024 * 1024 * config.getint("pretix_file_upload", "max_size_image", fallback=10)
 FILE_UPLOAD_MAX_SIZE_FAVICON = 1024 * 1024 * config.getint("pretix_file_upload", "max_size_favicon", fallback=1)
-FILE_UPLOAD_MAX_SIZE_EMAIL_ATTACHMENT = 1024 * 1024 * config.getint("pretix_file_upload", "max_size_email_attachment", fallback=10)
+FILE_UPLOAD_MAX_SIZE_EMAIL_ATTACHMENT = 1024 * 1024 * config.getint("pretix_file_upload", "max_size_email_attachment", fallback=5)
 FILE_UPLOAD_MAX_SIZE_EMAIL_AUTO_ATTACHMENT = 1024 * 1024 * config.getint("pretix_file_upload", "max_size_email_auto_attachment", fallback=1)
 FILE_UPLOAD_MAX_SIZE_OTHER = 1024 * 1024 * config.getint("pretix_file_upload", "max_size_other", fallback=10)
 

@@ -48,12 +48,14 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.utils.timezone import now
 from django_scopes import scope, scopes_disabled
+from freezegun import freeze_time
 
 from pretix.base.i18n import language
 from pretix.base.models import (
     CachedFile, CartPosition, Checkin, CheckinList, Event, Item, ItemCategory,
     ItemVariation, Order, OrderFee, OrderPayment, OrderPosition, OrderRefund,
-    Organizer, Question, Quota, SeatingPlan, User, Voucher, WaitingListEntry,
+    Organizer, Question, Quota, ScheduledEventExport, SeatingPlan, User,
+    Voucher, WaitingListEntry,
 )
 from pretix.base.models.event import SubEvent
 from pretix.base.models.items import (
@@ -89,7 +91,7 @@ class BaseQuotaTestCase(TestCase):
         )
         self.quota = Quota.objects.create(name="Test", size=2, event=self.event)
         self.item1 = Item.objects.create(event=self.event, name="Ticket", default_price=23,
-                                         admission=True)
+                                         admission=True, personalized=True)
         self.item2 = Item.objects.create(event=self.event, name="T-Shirt", default_price=23)
         self.item3 = Item.objects.create(event=self.event, name="Goodie", default_price=23)
         self.var1 = ItemVariation.objects.create(item=self.item2, value='S')
@@ -482,6 +484,22 @@ class QuotaTestCase(BaseQuotaTestCase):
             self.assertEqual(self.var1.check_quotas(_cache=cache, count_waitinglist=False), (Quota.AVAILABILITY_OK, 1))
 
     @classscope(attr='o')
+    def test_ignore_if_blocked(self):
+        q1 = self.event.quotas.create(name="Q1", size=50)
+        q1.items.add(self.item1)
+
+        # Create orders
+        order = Order.objects.create(event=self.event, status=Order.STATUS_PAID,
+                                     expires=now() + timedelta(days=3),
+                                     total=6)
+        OrderPosition.objects.create(order=order, item=self.item1, price=2)
+        OrderPosition.objects.create(order=order, item=self.item1, price=2, blocked=["foo"])
+        OrderPosition.objects.create(order=order, item=self.item1, price=2, blocked=["foo"], ignore_from_quota_while_blocked=True)
+        OrderPosition.objects.create(order=order, item=self.item1, price=2, ignore_from_quota_while_blocked=True)
+
+        self.assertEqual(self.item1.check_quotas(), (Quota.AVAILABILITY_OK, 47))
+
+    @classscope(attr='o')
     def test_subevent_isolation(self):
         self.event.has_subevents = True
         self.event.save()
@@ -788,7 +806,18 @@ class VoucherTestCase(BaseQuotaTestCase):
         self.assertTrue(v.is_in_cart())
         self.assertFalse(v.is_ordered())
 
-        order = perform_order(event=self.event.id, payment_provider='free', positions=[cart.id])
+        order = perform_order(
+            event=self.event.id,
+            positions=[cart.id],
+            payments=[{
+                "id": "test0",
+                "provider": "free",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+            }],
+        )
         v.refresh_from_db()
         self.assertFalse(v.is_active())
         self.assertFalse(v.is_in_cart())
@@ -797,10 +826,23 @@ class VoucherTestCase(BaseQuotaTestCase):
         # assert that the voucher cannot be reused
         cart = CartPosition.objects.create(event=self.event, item=self.item1, price=self.item1.default_price,
                                            expires=now() + timedelta(days=3), voucher=v)
-        self.assertRaises(OrderError, perform_order, event=self.event.id, payment_provider='free', positions=[cart.id])
+        self.assertRaises(
+            OrderError,
+            perform_order,
+            event=self.event.id,
+            positions=[cart.id],
+            payments=[{
+                "id": "test0",
+                "provider": "free",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+            }],
+        )
 
         # assert that the voucher can be re-used after cancelling the successful order
-        cancel_order(order)
+        cancel_order(order['order_id'])
         v.refresh_from_db()
         self.assertTrue(v.is_active())
         self.assertFalse(v.is_in_cart())
@@ -808,7 +850,18 @@ class VoucherTestCase(BaseQuotaTestCase):
 
         cart = CartPosition.objects.create(event=self.event, item=self.item1, price=self.item1.default_price,
                                            expires=now() + timedelta(days=3), voucher=v)
-        perform_order(event=self.event.id, payment_provider='free', positions=[cart.id])
+        perform_order(
+            event=self.event.id,
+            positions=[cart.id],
+            payments=[{
+                "id": "test0",
+                "provider": "free",
+                "max_value": None,
+                "min_value": None,
+                "multi_use_supported": False,
+                "info_data": {},
+            }],
+        )
 
     @classscope(attr='o')
     def test_voucher_applicability_quota(self):
@@ -1273,7 +1326,7 @@ class OrderTestCase(BaseQuotaTestCase):
         assert self.order.user_cancel_allowed
 
     @classscope(attr='o')
-    def test_can_cancel_checked_in(self):
+    def test_can_not_cancel_checked_in(self):
         self.order.status = Order.STATUS_PAID
         self.order.save()
         self.event.settings.cancel_allow_user = False
@@ -1283,6 +1336,17 @@ class OrderTestCase(BaseQuotaTestCase):
             position=self.order.positions.first(),
             list=CheckinList.objects.create(event=self.event, name='Default')
         )
+        assert not self.order.user_cancel_allowed
+
+    @classscope(attr='o')
+    def test_can_not_cancel_blocked(self):
+        self.order.status = Order.STATUS_PAID
+        self.order.save()
+        self.event.settings.cancel_allow_user = False
+        self.event.settings.cancel_allow_user_paid = True
+        assert self.order.user_cancel_allowed
+        self.op1.blocked = ["admin"]
+        self.op1.save()
         assert not self.order.user_cancel_allowed
 
     @classscope(attr='o')
@@ -1403,6 +1467,8 @@ class OrderTestCase(BaseQuotaTestCase):
         self.order.total = 48
         self.order.save()
         self.order = Order.objects.get(pk=self.order.pk)
+        self.order.status = Order.STATUS_PAID
+        self.order.save()
         assert self.order.user_cancel_fee == Decimal('0.00')
 
         self.event.settings.cancel_allow_user_paid_keep = Decimal('2.50')
@@ -1418,6 +1484,27 @@ class OrderTestCase(BaseQuotaTestCase):
         assert self.order.user_cancel_fee == Decimal('9.10')
 
         self.event.settings.cancel_allow_user_paid_keep = Decimal('100.00')
+        self.order = Order.objects.get(pk=self.order.pk)
+        assert self.order.user_cancel_fee == Decimal('48.00')
+
+        self.order.status = Order.STATUS_PENDING
+        self.order.save()
+        self.order = Order.objects.get(pk=self.order.pk)
+        assert self.order.user_cancel_fee == Decimal('0.00')
+
+        self.event.settings.cancel_allow_user_unpaid_keep = Decimal('2.50')
+        self.order = Order.objects.get(pk=self.order.pk)
+        assert self.order.user_cancel_fee == Decimal('2.50')
+
+        self.event.settings.cancel_allow_user_unpaid_keep_percentage = Decimal('5.0')
+        self.order = Order.objects.get(pk=self.order.pk)
+        assert self.order.user_cancel_fee == Decimal('4.90')
+
+        self.event.settings.cancel_allow_user_unpaid_keep_fees = True
+        self.order = Order.objects.get(pk=self.order.pk)
+        assert self.order.user_cancel_fee == Decimal('6.80')
+
+        self.event.settings.cancel_allow_user_unpaid_keep = Decimal('100.00')
         self.order = Order.objects.get(pk=self.order.pk)
         assert self.order.user_cancel_fee == Decimal('48.00')
 
@@ -1616,20 +1703,29 @@ class OrderTestCase(BaseQuotaTestCase):
 
     @classscope(attr='o')
     def test_can_change_order(self):
+        self.event.settings.change_allow_attendee = True
         item1 = Item.objects.create(event=self.event, name="Ticket", default_price=23,
                                     admission=True, allow_cancel=True)
         v = item1.variations.create(value="V")
-        OrderPosition.objects.create(order=self.order, item=item1,
-                                     variation=v, price=23)
+        op = OrderPosition.objects.create(order=self.order, item=item1,
+                                          variation=v, price=23)
         assert not self.order.user_change_allowed
+        assert not op.attendee_change_allowed
         self.event.settings.change_allow_user_variation = True
         assert self.order.user_change_allowed
+        assert op.attendee_change_allowed
+
+        self.event.settings.change_allow_attendee = False
+        assert not op.attendee_change_allowed
+        self.event.settings.change_allow_attendee = True
 
         self.event.settings.change_allow_user_variation = False
         self.order.require_approval = True
         assert not self.order.user_change_allowed
+        assert not op.attendee_change_allowed
         self.event.settings.change_allow_user_variation = True
         assert not self.order.user_change_allowed
+        assert not op.attendee_change_allowed
 
     @classscope(attr='o')
     def test_can_change_order_with_giftcard(self):
@@ -1639,10 +1735,12 @@ class OrderTestCase(BaseQuotaTestCase):
         p = OrderPosition.objects.create(order=self.order, item=item1,
                                          variation=v, price=23)
         self.event.settings.change_allow_user_variation = True
+        self.event.settings.change_allow_attendee = True
         self.event.organizer.issued_gift_cards.create(
             currency="EUR", issued_in=p
         )
         assert not self.order.user_change_allowed
+        assert not p.attendee_change_allowed
 
     @classscope(attr='o')
     def test_can_change_checked_in(self):
@@ -1651,12 +1749,14 @@ class OrderTestCase(BaseQuotaTestCase):
         self.order.status = Order.STATUS_PAID
         self.order.save()
         self.event.settings.change_allow_user_variation = True
+        self.event.settings.change_allow_attendee = True
         assert self.order.user_change_allowed
         Checkin.objects.create(
             position=self.order.positions.first(),
             list=CheckinList.objects.create(event=self.event, name='Default')
         )
         assert not self.order.user_change_allowed
+        assert not self.order.positions.first().attendee_change_allowed
 
     @classscope(attr='o')
     def test_can_change_order_multiple(self):
@@ -1671,7 +1771,9 @@ class OrderTestCase(BaseQuotaTestCase):
         OrderPosition.objects.create(order=self.order, item=item2,
                                      variation=v2, price=23)
         self.event.settings.change_allow_user_variation = True
+        self.event.settings.change_allow_attendee = True
         assert self.order.user_change_allowed
+        assert not self.order.positions.first().attendee_change_allowed
 
     @classscope(attr='o')
     def test_can_not_change_order(self):
@@ -1681,22 +1783,26 @@ class OrderTestCase(BaseQuotaTestCase):
         OrderPosition.objects.create(order=self.order, item=item1,
                                      variation=v, price=23)
         self.event.settings.change_allow_user_variation = True
+        self.event.settings.change_allow_attendee = True
         assert self.order.user_change_allowed is False
 
     @classscope(attr='o')
     def test_require_any_variation(self):
         item1 = Item.objects.create(event=self.event, name="Ticket", default_price=23,
                                     admission=True, allow_cancel=True)
-        OrderPosition.objects.create(order=self.order, item=item1,
-                                     variation=None, price=23)
+        p = OrderPosition.objects.create(order=self.order, item=item1,
+                                         variation=None, price=23)
         self.event.settings.change_allow_user_variation = True
+        self.event.settings.change_allow_attendee = True
         assert self.order.user_change_allowed is False
         item2 = Item.objects.create(event=self.event, name="Ticket", default_price=23,
                                     admission=True, allow_cancel=True)
         v2 = item2.variations.create(value="V")
-        OrderPosition.objects.create(order=self.order, item=item2,
-                                     variation=v2, price=23)
+        p2 = OrderPosition.objects.create(order=self.order, item=item2,
+                                          variation=v2, price=23)
         assert self.order.user_change_allowed is True
+        assert p.attendee_change_allowed is False
+        assert p2.attendee_change_allowed is True
 
     @classscope(attr='o')
     def test_can_not_change_order_multiple(self):
@@ -1800,11 +1906,10 @@ class ItemCategoryTest(TestCase):
     This test case tests various methods around the category model.
     """
 
-    @classmethod
-    def setUpTestData(cls):
-        cls.o = Organizer.objects.create(name='Dummy', slug='dummy')
-        cls.event = Event.objects.create(
-            organizer=cls.o, name='Dummy', slug='dummy',
+    def setUp(self):
+        self.o = Organizer.objects.create(name='Dummy', slug='dummy')
+        self.event = Event.objects.create(
+            organizer=self.o, name='Dummy', slug='dummy',
             date_from=now(),
         )
 
@@ -1829,11 +1934,10 @@ class ItemTest(TestCase):
     This test case tests various methods around the item model.
     """
 
-    @classmethod
-    def setUpTestData(cls):
-        cls.o = Organizer.objects.create(name='Dummy', slug='dummy')
-        cls.event = Event.objects.create(
-            organizer=cls.o, name='Dummy', slug='dummy',
+    def setUp(self):
+        self.o = Organizer.objects.create(name='Dummy', slug='dummy')
+        self.event = Event.objects.create(
+            organizer=self.o, name='Dummy', slug='dummy',
             date_from=now(),
         )
 
@@ -1904,11 +2008,36 @@ class ItemTest(TestCase):
         assert not Item.objects.filter_available().exists()
         assert Item.objects.filter_available(voucher=v).exists()
 
+    @classscope(attr='o')
+    def test_meta_data_inheritance(self):
+        prop = self.event.item_meta_properties.create(name="day", default="Monday")
+        i = Item.objects.create(
+            event=self.event, name="Ticket", default_price=23,
+            active=True, available_until=now() + timedelta(days=1),
+        )
+        v = i.variations.create(value="Day 1")
+
+        assert i.meta_data == {"day": "Monday"}
+        assert v.meta_data == {"day": "Monday"}
+
+        i.meta_values.create(property=prop, value="Tuesday")
+        i = Item.objects.get(pk=i.pk)
+        v = ItemVariation.objects.get(pk=v.pk)
+
+        assert i.meta_data == {"day": "Tuesday"}
+        assert v.meta_data == {"day": "Tuesday"}
+
+        v.meta_values.create(property=prop, value="Wednesday")
+        i = Item.objects.get(pk=i.pk)
+        v = ItemVariation.objects.get(pk=v.pk)
+
+        assert i.meta_data == {"day": "Tuesday"}
+        assert v.meta_data == {"day": "Wednesday"}
+
 
 class EventTest(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        cls.organizer = Organizer.objects.create(name='Dummy', slug='dummy')
+    def setUp(self):
+        self.organizer = Organizer.objects.create(name='Dummy', slug='dummy')
 
     @classscope(attr='organizer')
     def test_event_end_before_start(self):
@@ -2014,7 +2143,8 @@ class EventTest(TestCase):
             "and": [
                 {"isBefore": [{"var": "now"}, {"buildTime": ["date_from"]}, None]},
                 {"inList": [{"var": "product"}, {"objectList": [{"lookup": ["product", str(i1new.pk), "Text"]}]}]},
-                {"inList": [{"var": "variation"}, {"objectList": [{"lookup": ["variation", str(i1new.variations.get().pk), "Text"]}]}]}
+                {"inList": [{"var": "variation"},
+                            {"objectList": [{"lookup": ["variation", str(i1new.variations.get().pk), "Text"]}]}]}
             ]
         }
 
@@ -2099,7 +2229,8 @@ class EventTest(TestCase):
             date_from=now()
         )
         q = Quota.objects.create(event=event, name='Quota', size=2)
-        item = Item.objects.create(event=event, name='Early-bird ticket', default_price=0, active=True, available_until=now() - timedelta(days=1))
+        item = Item.objects.create(event=event, name='Early-bird ticket', default_price=0, active=True,
+                                   available_until=now() - timedelta(days=1))
         q.items.add(item)
         assert Event.annotated(Event.objects).first().active_quotas == []
 
@@ -2153,16 +2284,15 @@ class EventTest(TestCase):
 
 
 class SubEventTest(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        cls.organizer = Organizer.objects.create(name='Dummy', slug='dummy')
-        cls.event = Event.objects.create(
-            organizer=cls.organizer, name='Dummy', slug='dummy',
+    def setUp(self):
+        self.organizer = Organizer.objects.create(name='Dummy', slug='dummy')
+        self.event = Event.objects.create(
+            organizer=self.organizer, name='Dummy', slug='dummy',
             date_from=now(), date_to=now() - timedelta(hours=1),
             has_subevents=True
         )
-        cls.se = SubEvent.objects.create(
-            name='Testsub', date_from=now(), event=cls.event
+        self.se = SubEvent.objects.create(
+            name='Testsub', date_from=now(), event=self.event
         )
 
     @classscope(attr='organizer')
@@ -2211,24 +2341,61 @@ class SubEventTest(TestCase):
 
     @classscope(attr='organizer')
     def test_best_availability(self):
-        q = Quota.objects.create(event=self.event, name='Quota', size=0,
-                                 subevent=self.se)
         item = Item.objects.create(event=self.event, name='Early-bird ticket', default_price=0, active=True)
+        o = Order.objects.create(
+            code='FOO', event=self.event, email='dummy@dummy.test',
+            status=Order.STATUS_PAID,
+            datetime=now(), expires=now() + timedelta(days=10),
+            total=Decimal("30"), locale='en'
+        )
+        OrderPosition.objects.create(
+            order=o,
+            item=item,
+            subevent=self.se,
+            variation=None,
+            price=Decimal("12"),
+        )
+        self.event.settings.low_availability_percentage = 60
+
+        # 1 quota - 1 item
+        q = Quota.objects.create(event=self.event, name='Quota', size=1,
+                                 subevent=self.se)
         q.items.add(item)
         obj = SubEvent.annotated(SubEvent.objects).first()
         assert len(obj.active_quotas) == 1
-        assert obj.best_availability_state == Quota.AVAILABILITY_GONE
-        q2 = Quota.objects.create(event=self.event, name='Quota 2', size=1,
+        assert obj.best_availability == (Quota.AVAILABILITY_GONE, 0, 1)
+
+        # 2 quotas - 1 item. Lowest quota wins.
+        q2 = Quota.objects.create(event=self.event, name='Quota 2', size=2,
                                   subevent=self.se)
         q2.items.add(item)
         obj = SubEvent.annotated(SubEvent.objects).first()
         assert len(obj.active_quotas) == 2
-        assert obj.best_availability_state == Quota.AVAILABILITY_GONE
+        assert obj.best_availability == (Quota.AVAILABILITY_GONE, 0, 1)
+
+        # 2 quotas - 2 items. Higher quota wins since second item is only connected to second quota.
         item2 = Item.objects.create(event=self.event, name='Regular ticket', default_price=10, active=True)
         q2.items.add(item2)
         obj = SubEvent.annotated(SubEvent.objects).first()
         assert len(obj.active_quotas) == 2
-        assert obj.best_availability_state == Quota.AVAILABILITY_OK
+        assert obj.best_availability == (Quota.AVAILABILITY_OK, 1, 2)
+        assert obj.best_availability_is_low
+
+        # 1 quota - 2 items. Quota is not counted twice!
+        q.size = 10
+        q.save()
+        q2.delete()
+        obj = SubEvent.annotated(SubEvent.objects).first()
+        assert len(obj.active_quotas) == 1
+        assert obj.best_availability == (Quota.AVAILABILITY_OK, 9, 10)
+        assert not obj.best_availability_is_low
+
+        # Unlimited quota
+        q.size = None
+        q.save()
+        obj = SubEvent.annotated(SubEvent.objects).first()
+        assert obj.best_availability == (Quota.AVAILABILITY_OK, None, None)
+        assert not obj.best_availability_is_low
 
 
 class CachedFileTestCase(TestCase):
@@ -2248,71 +2415,70 @@ class CachedFileTestCase(TestCase):
 
 
 class CheckinListTestCase(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        cls.organizer = Organizer.objects.create(name='Dummy', slug='dummy')
-        with scope(organizer=cls.organizer):
-            cls.event = Event.objects.create(
-                organizer=cls.organizer, name='Dummy', slug='dummy',
+    def setUp(self):
+        self.organizer = Organizer.objects.create(name='Dummy', slug='dummy')
+        with scope(organizer=self.organizer):
+            self.event = Event.objects.create(
+                organizer=self.organizer, name='Dummy', slug='dummy',
                 date_from=now(), date_to=now() - timedelta(hours=1),
             )
-            cls.item1 = cls.event.items.create(name="Ticket", default_price=12)
-            cls.item2 = cls.event.items.create(name="Shirt", default_price=6)
-            cls.cl_all = cls.event.checkin_lists.create(
+            self.item1 = self.event.items.create(name="Ticket", default_price=12)
+            self.item2 = self.event.items.create(name="Shirt", default_price=6)
+            self.cl_all = self.event.checkin_lists.create(
                 name='All', all_products=True
             )
-            cls.cl_all_pending = cls.event.checkin_lists.create(
+            self.cl_all_pending = self.event.checkin_lists.create(
                 name='Z Pending', all_products=True, include_pending=True
             )
-            cls.cl_both = cls.event.checkin_lists.create(
+            self.cl_both = self.event.checkin_lists.create(
                 name='Both', all_products=False
             )
-            cls.cl_both.limit_products.add(cls.item1)
-            cls.cl_both.limit_products.add(cls.item2)
-            cls.cl_tickets = cls.event.checkin_lists.create(
+            self.cl_both.limit_products.add(self.item1)
+            self.cl_both.limit_products.add(self.item2)
+            self.cl_tickets = self.event.checkin_lists.create(
                 name='Tickets', all_products=False
             )
-            cls.cl_tickets.limit_products.add(cls.item1)
+            self.cl_tickets.limit_products.add(self.item1)
             o = Order.objects.create(
-                code='FOO', event=cls.event, email='dummy@dummy.test',
+                code='FOO', event=self.event, email='dummy@dummy.test',
                 status=Order.STATUS_PAID,
                 datetime=now(), expires=now() + timedelta(days=10),
                 total=Decimal("30"), locale='en'
             )
             OrderPosition.objects.create(
                 order=o,
-                item=cls.item1,
+                item=self.item1,
                 variation=None,
                 price=Decimal("12"),
             )
             op2 = OrderPosition.objects.create(
                 order=o,
-                item=cls.item1,
+                item=self.item1,
                 variation=None,
                 price=Decimal("12"),
             )
             op3 = OrderPosition.objects.create(
                 order=o,
-                item=cls.item2,
+                item=self.item2,
                 variation=None,
                 price=Decimal("6"),
             )
-            op2.checkins.create(list=cls.cl_tickets)
-            op3.checkins.create(list=cls.cl_both)
+            op2.checkins.create(list=self.cl_tickets)
+            op3.checkins.create(list=self.cl_both)
 
             o = Order.objects.create(
-                code='FOO', event=cls.event, email='dummy@dummy.test',
+                code='FOO', event=self.event, email='dummy@dummy.test',
                 status=Order.STATUS_PENDING,
                 datetime=now(), expires=now() + timedelta(days=10),
                 total=Decimal("30"), locale='en'
             )
             op4 = OrderPosition.objects.create(
                 order=o,
-                item=cls.item2,
+                item=self.item2,
                 variation=None,
                 price=Decimal("6"),
             )
-            op4.checkins.create(list=cls.cl_all_pending)
+            op4.checkins.create(list=self.cl_all_pending)
 
     @classscope(attr='organizer')
     def test_attributes(self):
@@ -2680,3 +2846,52 @@ def test_subevent_date_updates_order_date():
 
         assert order1.last_modified > o1lm
         assert order2.last_modified == o2lm
+
+
+class ScheduledExportTestCase(TestCase):
+
+    @scopes_disabled()
+    def setUp(self):
+        self.organizer = Organizer.objects.create(name='Dummy', slug='dummy')
+        self.event = Event.objects.create(
+            organizer=self.organizer, name='Dummy', slug='dummy',
+            date_from=now(), date_to=now() - timedelta(hours=1), has_subevents=True
+        )
+        self.event.settings.timezone = 'Europe/Berlin'
+
+    @classscope(attr='organizer')
+    def test_compute_next_time(self):
+        s = ScheduledEventExport(event=self.event)
+        s.schedule_rrule = "DTSTART:20230118T000000\nRRULE:FREQ=WEEKLY;COUNT=30;INTERVAL=1;WKST=MO;BYDAY=TU,TH"
+        s.schedule_rrule_time = datetime.time(6, 30, 0)
+
+        with freeze_time("2023-01-18 15:08:00+01:00"):
+            s.compute_next_run()
+            assert s.schedule_next_run == self.event.timezone.localize(datetime.datetime(2023, 1, 19, 6, 30, 0))
+
+        with freeze_time("2023-01-19 06:28:00+01:00"):
+            s.compute_next_run()
+            assert s.schedule_next_run == self.event.timezone.localize(datetime.datetime(2023, 1, 19, 6, 30, 0))
+
+        with freeze_time("2023-01-19 06:30:00+01:00"):
+            s.compute_next_run()
+            assert s.schedule_next_run == self.event.timezone.localize(datetime.datetime(2023, 1, 24, 6, 30, 0))
+
+        with freeze_time("2024-01-18 15:08:00+01:00"):
+            s.compute_next_run()
+            assert s.schedule_next_run is None
+
+    @classscope(attr='organizer')
+    def test_compute_next_time_handle_dst(self):
+        s = ScheduledEventExport(event=self.event)
+        s.schedule_rrule = "DTSTART:20230118T000000\nRRULE:FREQ=DAILY;INTERVAL=1;WKST=MO"
+        s.schedule_rrule_time = datetime.time(2, 30, 0)
+        with freeze_time("2023-03-25 18:00:00+01:00"):
+            s.compute_next_run()
+            assert s.schedule_next_run == self.event.timezone.localize(datetime.datetime(2023, 3, 26, 3, 30, 0))
+        with freeze_time("2023-03-26 18:00:00+01:00"):
+            s.compute_next_run()
+            assert s.schedule_next_run == self.event.timezone.localize(datetime.datetime(2023, 3, 27, 2, 30, 0))
+        with freeze_time("2023-10-28 18:00:00+01:00"):
+            s.compute_next_run()
+            assert s.schedule_next_run == self.event.timezone.localize(datetime.datetime(2023, 10, 29, 2, 30, 0, fold=0))

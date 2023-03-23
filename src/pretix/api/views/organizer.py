@@ -22,14 +22,13 @@
 from decimal import Decimal
 
 import django_filters
+from django.contrib.auth.hashers import make_password
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils.functional import cached_property
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet
 from django_scopes import scopes_disabled
-from rest_framework import (
-    filters, mixins, serializers, status, views, viewsets,
-)
+from rest_framework import mixins, serializers, status, views, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework.mixins import CreateModelMixin, DestroyModelMixin
@@ -37,9 +36,10 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
 from pretix.api.models import OAuthAccessToken
+from pretix.api.pagination import TotalOrderingFilter
 from pretix.api.serializers.organizer import (
-    CustomerSerializer, DeviceSerializer, GiftCardSerializer,
-    GiftCardTransactionSerializer, MembershipSerializer,
+    CustomerCreateSerializer, CustomerSerializer, DeviceSerializer,
+    GiftCardSerializer, GiftCardTransactionSerializer, MembershipSerializer,
     MembershipTypeSerializer, OrganizerSerializer, OrganizerSettingsSerializer,
     SeatingPlanSerializer, TeamAPITokenSerializer, TeamInviteSerializer,
     TeamMemberSerializer, TeamSerializer,
@@ -50,6 +50,7 @@ from pretix.base.models import (
     User,
 )
 from pretix.base.settings import SETTINGS_AFFECTING_CSS
+from pretix.helpers import OF_SELF
 from pretix.helpers.dicts import merge_dicts
 from pretix.presale.style import regenerate_organizer_css
 
@@ -60,7 +61,7 @@ class OrganizerViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_field = 'slug'
     lookup_url_kwarg = 'organizer'
     lookup_value_regex = '[^/]+'
-    filter_backends = (filters.OrderingFilter,)
+    filter_backends = (TotalOrderingFilter,)
     ordering = ('slug',)
     ordering_fields = ('name', 'slug')
 
@@ -177,7 +178,7 @@ class GiftCardViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         if 'include_accepted' in self.request.GET:
             raise PermissionDenied("Accepted gift cards cannot be updated, use transact instead.")
-        GiftCard.objects.select_for_update().get(pk=self.get_object().pk)
+        GiftCard.objects.select_for_update(of=OF_SELF).get(pk=self.get_object().pk)
         old_value = serializer.instance.value
         value = serializer.validated_data.pop('value')
         inst = serializer.save(secret=serializer.instance.secret, currency=serializer.instance.currency,
@@ -195,8 +196,8 @@ class GiftCardViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["POST"])
     @transaction.atomic()
     def transact(self, request, **kwargs):
-        gc = GiftCard.objects.select_for_update().get(pk=self.get_object().pk)
-        value = serializers.DecimalField(max_digits=10, decimal_places=2).to_internal_value(
+        gc = GiftCard.objects.select_for_update(of=OF_SELF).get(pk=self.get_object().pk)
+        value = serializers.DecimalField(max_digits=13, decimal_places=2).to_internal_value(
             request.data.get('value')
         )
         text = serializers.CharField(allow_blank=True, allow_null=True).to_internal_value(
@@ -514,15 +515,24 @@ class CustomerViewSet(viewsets.ModelViewSet):
         raise MethodNotAllowed("Customers cannot be deleted.")
 
     @transaction.atomic()
-    def perform_create(self, serializer):
-        inst = serializer.save(organizer=self.request.organizer)
+    def perform_create(self, serializer, send_email=False, password=None):
+        customer = serializer.save(organizer=self.request.organizer, password=make_password(password))
         serializer.instance.log_action(
             'pretix.customer.created',
             user=self.request.user,
             auth=self.request.auth,
             data=self.request.data,
         )
-        return inst
+        if send_email:
+            customer.send_activation_mail()
+        return customer
+
+    def create(self, request, *args, **kwargs):
+        serializer = CustomerCreateSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer, send_email=serializer.validated_data.pop('send_email', False), password=serializer.validated_data.pop('password', None))
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     @transaction.atomic()
     def perform_update(self, serializer):

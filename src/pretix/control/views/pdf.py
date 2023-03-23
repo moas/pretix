@@ -39,8 +39,8 @@ from django.utils.crypto import get_random_string
 from django.utils.timezone import now
 from django.utils.translation import gettext as _
 from django.views.generic import TemplateView
-from PyPDF2 import PdfFileReader, PdfFileWriter
-from PyPDF2.utils import PdfReadError
+from pypdf import PdfReader, PdfWriter
+from pypdf.errors import PdfReadError
 from reportlab.lib.units import mm
 
 from pretix.base.i18n import language
@@ -153,11 +153,11 @@ class BaseEditorView(EventPermissionRequiredMixin, TemplateView):
 
     def post(self, request, *args, **kwargs):
         if "emptybackground" in request.POST:
-            p = PdfFileWriter()
+            p = PdfWriter()
             try:
-                p.addBlankPage(
-                    width=float(request.POST.get('width')) * mm,
-                    height=float(request.POST.get('height')) * mm,
+                p.add_blank_page(
+                    width=Decimal('%.5f' % (float(request.POST.get('width')) * mm)),
+                    height=Decimal('%.5f' % (float(request.POST.get('height')) * mm)),
                 )
             except ValueError:
                 return JsonResponse({
@@ -203,7 +203,7 @@ class BaseEditorView(EventPermissionRequiredMixin, TemplateView):
 
             try:
                 bg_bytes = c.file.read()
-                PdfFileReader(BytesIO(bg_bytes), strict=False)
+                PdfReader(BytesIO(bg_bytes), strict=False)
             except PdfReadError as e:
                 return JsonResponse({
                     "status": "error",

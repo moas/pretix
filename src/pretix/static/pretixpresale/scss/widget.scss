@@ -331,6 +331,28 @@
     width: 100%;
   }
 
+  .pretix-widget-seating-waitinglist {
+    margin: 15px 0;
+  }
+
+  .pretix-widget-seating-waitinglist-text {
+    padding: 0 15px;
+    width: 75%;
+    box-sizing: border-box;
+    float: left;
+  }
+
+  .pretix-widget-seating-waitinglist-button-wrap {
+    padding: 0 15px;
+    width: 25%;
+    box-sizing: border-box;
+    float: left;
+  }
+
+  .pretix-widget-seating-waitinglist-button {
+    width: 100%;
+  }
+
   .pretix-widget-item-with-picture .pretix-widget-main-item-row .pretix-widget-item-title-and-description {
     margin-left: 70px;
   }
@@ -472,6 +494,12 @@
   .pretix-widget-event-availability-red .pretix-widget-event-list-entry-availability span,
   .pretix-widget-event-availability-red.pretix-widget-event-calendar-event {
     background-color: $brand-danger;
+  }
+  .pretix-widget-event-availability-low .pretix-widget-event-list-entry-availability span {
+    border-left: 10px solid $brand-warning;
+  }
+  .pretix-widget-event-availability-low.pretix-widget-event-calendar-event {
+    border-right: 10px solid $brand-warning;
   }
 
   .pretix-widget-event-calendar {
@@ -695,6 +723,7 @@
     text-decoration: none;
     padding: 4px 0;
     display: block;
+    line-height: 16px;
   }
 
   .pretix-widget-frame-inner iframe {

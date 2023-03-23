@@ -47,42 +47,105 @@ from pretix.api.serializers.fields import UploadedFileField
 from pretix.api.serializers.i18n import I18nAwareModelSerializer
 from pretix.base.models import (
     Item, ItemAddOn, ItemBundle, ItemCategory, ItemMetaValue, ItemVariation,
-    Question, QuestionOption, Quota,
+    ItemVariationMetaValue, Question, QuestionOption, Quota,
 )
 
 
 class InlineItemVariationSerializer(I18nAwareModelSerializer):
-    price = serializers.DecimalField(read_only=True, decimal_places=2, max_digits=10,
+    price = serializers.DecimalField(read_only=True, decimal_places=2, max_digits=13,
                                      coerce_to_string=True)
+    meta_data = MetaDataField(required=False, source='*')
 
     class Meta:
         model = ItemVariation
         fields = ('id', 'value', 'active', 'description',
                   'position', 'default_price', 'price', 'original_price', 'require_approval',
-                  'require_membership', 'require_membership_types',
-                  'require_membership_hidden', 'available_from', 'available_until',
-                  'sales_channels', 'hide_without_voucher',)
+                  'require_membership', 'require_membership_types', 'require_membership_hidden',
+                  'checkin_attention', 'available_from', 'available_until',
+                  'sales_channels', 'hide_without_voucher', 'meta_data')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['require_membership_types'].queryset = lazy(lambda: self.context['event'].organizer.membership_types.all(), QuerySet)
 
+    def validate_meta_data(self, value):
+        for key in value['meta_data'].keys():
+            if key not in self.parent.parent.item_meta_properties:
+                raise ValidationError(_('Item meta data property \'{name}\' does not exist.').format(name=key))
+        return value
+
 
 class ItemVariationSerializer(I18nAwareModelSerializer):
-    price = serializers.DecimalField(read_only=True, decimal_places=2, max_digits=10,
+    price = serializers.DecimalField(read_only=True, decimal_places=2, max_digits=13,
                                      coerce_to_string=True)
+    meta_data = MetaDataField(required=False, source='*')
 
     class Meta:
         model = ItemVariation
         fields = ('id', 'value', 'active', 'description',
                   'position', 'default_price', 'price', 'original_price', 'require_approval',
-                  'require_membership', 'require_membership_types',
-                  'require_membership_hidden', 'available_from', 'available_until',
-                  'sales_channels', 'hide_without_voucher',)
+                  'require_membership', 'require_membership_types', 'require_membership_hidden',
+                  'checkin_attention', 'available_from', 'available_until',
+                  'sales_channels', 'hide_without_voucher', 'meta_data')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['require_membership_types'].queryset = self.context['event'].organizer.membership_types.all()
+
+    @transaction.atomic
+    def create(self, validated_data):
+        meta_data = validated_data.pop('meta_data', None)
+        require_membership_types = validated_data.pop('require_membership_types', [])
+        variation = ItemVariation.objects.create(**validated_data)
+
+        if require_membership_types:
+            variation.require_membership_types.add(*require_membership_types)
+
+        # Meta data
+        if meta_data is not None:
+            for key, value in meta_data.items():
+                ItemVariationMetaValue.objects.create(
+                    property=self.item_meta_properties.get(key),
+                    value=value,
+                    variation=variation
+                )
+        return variation
+
+    @cached_property
+    def item_meta_properties(self):
+        return {
+            p.name: p for p in self.context['request'].event.item_meta_properties.all()
+        }
+
+    def validate_meta_data(self, value):
+        for key in value['meta_data'].keys():
+            if key not in self.item_meta_properties:
+                raise ValidationError(_('Item meta data property \'{name}\' does not exist.').format(name=key))
+        return value
+
+    def update(self, instance, validated_data):
+        meta_data = validated_data.pop('meta_data', None)
+        variation = super().update(instance, validated_data)
+
+        # Meta data
+        if meta_data is not None:
+            current = {mv.property: mv for mv in variation.meta_values.select_related('property')}
+            for key, value in meta_data.items():
+                prop = self.item_meta_properties.get(key)
+                if prop in current:
+                    current[prop].value = value
+                    current[prop].save()
+                else:
+                    variation.meta_values.create(
+                        property=self.item_meta_properties.get(key),
+                        value=value
+                    )
+
+            for prop, current_object in current.items():
+                if prop.name not in meta_data:
+                    current_object.delete()
+
+        return variation
 
 
 class InlineItemBundleSerializer(serializers.ModelSerializer):
@@ -171,7 +234,7 @@ class ItemSerializer(I18nAwareModelSerializer):
     class Meta:
         model = Item
         fields = ('id', 'category', 'name', 'internal_name', 'active', 'sales_channels', 'description',
-                  'default_price', 'free_price', 'tax_rate', 'tax_rule', 'admission',
+                  'default_price', 'free_price', 'tax_rate', 'tax_rule', 'admission', 'personalized',
                   'position', 'picture', 'available_from', 'available_until',
                   'require_voucher', 'hide_without_voucher', 'allow_cancel', 'require_bundling',
                   'min_per_order', 'max_per_order', 'checkin_attention', 'has_variations', 'variations',
@@ -179,13 +242,18 @@ class ItemSerializer(I18nAwareModelSerializer):
                   'show_quota_left', 'hidden_if_available', 'allow_waitinglist', 'issue_giftcard', 'meta_data',
                   'require_membership', 'require_membership_types', 'require_membership_hidden', 'grant_membership_type',
                   'grant_membership_duration_like_event', 'grant_membership_duration_days',
-                  'grant_membership_duration_months')
+                  'grant_membership_duration_months', 'validity_mode', 'validity_fixed_from', 'validity_fixed_until',
+                  'validity_dynamic_duration_minutes', 'validity_dynamic_duration_hours', 'validity_dynamic_duration_days',
+                  'validity_dynamic_duration_months', 'validity_dynamic_start_choice', 'validity_dynamic_start_choice_day_limit')
         read_only_fields = ('has_variations',)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['require_membership_types'].queryset = self.context['event'].organizer.membership_types.all()
-        self.fields['grant_membership_type'].queryset = self.context['event'].organizer.membership_types.all()
+        self.fields['default_price'].allow_null = False
+        self.fields['default_price'].required = True
+        if not self.read_only:
+            self.fields['require_membership_types'].queryset = self.context['event'].organizer.membership_types.all()
+            self.fields['grant_membership_type'].queryset = self.context['event'].organizer.membership_types.all()
 
     def validate(self, data):
         data = super().validate(data)
@@ -195,6 +263,15 @@ class ItemSerializer(I18nAwareModelSerializer):
 
         Item.clean_per_order(data.get('min_per_order'), data.get('max_per_order'))
         Item.clean_available(data.get('available_from'), data.get('available_until'))
+
+        if data.get('personalized') and not data.get('admission'):
+            raise ValidationError(_('Only admission products can currently be personalized.'))
+
+        if data.get('admission') and 'personalized' not in data and not self.instance:
+            # Backwards compatibility
+            data['personalized'] = True
+        elif 'admission' in data and not data['admission']:
+            data['personalized'] = False
 
         if data.get('issue_giftcard'):
             if data.get('tax_rule') and data.get('tax_rule').rate > 0:
@@ -227,9 +304,9 @@ class ItemSerializer(I18nAwareModelSerializer):
         if not self.instance:
             for addon_data in value:
                 ItemAddOn.clean_categories(self.context['event'], None, self.instance, addon_data['addon_category'])
-                ItemAddOn.clean_min_count(addon_data['min_count'])
-                ItemAddOn.clean_max_count(addon_data['max_count'])
-                ItemAddOn.clean_max_min_count(addon_data['max_count'], addon_data['min_count'])
+                ItemAddOn.clean_min_count(addon_data.get('min_count', 0))
+                ItemAddOn.clean_max_count(addon_data.get('max_count', 0))
+                ItemAddOn.clean_max_min_count(addon_data.get('max_count', 0), addon_data.get('min_count', 0))
         return value
 
     @cached_property
@@ -260,9 +337,19 @@ class ItemSerializer(I18nAwareModelSerializer):
 
         for variation_data in variations_data:
             require_membership_types = variation_data.pop('require_membership_types', [])
+            var_meta_data = variation_data.pop('meta_data', {})
             v = ItemVariation.objects.create(item=item, **variation_data)
             if require_membership_types:
                 v.require_membership_types.add(*require_membership_types)
+
+            if var_meta_data is not None:
+                for key, value in var_meta_data.items():
+                    ItemVariationMetaValue.objects.create(
+                        property=self.item_meta_properties.get(key),
+                        value=value,
+                        variation=v
+                    )
+
         for addon_data in addons_data:
             ItemAddOn.objects.create(base_item=item, **addon_data)
         for bundle_data in bundles_data:

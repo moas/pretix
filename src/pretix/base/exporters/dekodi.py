@@ -23,22 +23,24 @@ import json
 from collections import OrderedDict
 from decimal import Decimal
 
-import dateutil
-from django import forms
 from django.core.serializers.json import DjangoJSONEncoder
 from django.dispatch import receiver
-from django.utils.translation import gettext, gettext_lazy
+from django.utils.timezone import now
+from django.utils.translation import gettext, gettext_lazy, pgettext_lazy
 
 from pretix.base.i18n import language
 from pretix.base.models import Invoice, OrderPayment
 
 from ..exporter import BaseExporter
 from ..signals import register_data_exporters
+from ..timeframes import DateFrameField, resolve_timeframe_to_dates_inclusive
 
 
 class DekodiNREIExporter(BaseExporter):
     identifier = 'dekodi_nrei'
     verbose_name = 'dekodi NREI (JSON)'
+    category = pgettext_lazy('export_category', 'Invoices')
+    description = gettext_lazy("Download invoices in a format that can be used by the dekodi NREI conversion software.")
 
     # Specification: http://manuals.dekodi.de/nexuspub/schnittstellenbuch/
 
@@ -113,7 +115,7 @@ class DekodiNREIExporter(BaseExporter):
                         'PTNo14': p.info_data.get('reference') or '',
                         'PTNo15': p.full_id or '',
                     })
-            elif p.provider.startswith('stripe'):
+            elif p.provider and p.provider.startswith('stripe'):
                 src = p.info_data.get("source", p.info_data)
                 payments.append({
                     'PTID': '81',
@@ -192,17 +194,12 @@ class DekodiNREIExporter(BaseExporter):
     def render(self, form_data):
         qs = self.event.invoices.select_related('order').prefetch_related('lines', 'lines__subevent')
 
-        if form_data.get('date_from'):
-            date_value = form_data.get('date_from')
-            if isinstance(date_value, str):
-                date_value = dateutil.parser.parse(date_value).date()
-            qs = qs.filter(date__gte=date_value)
-
-        if form_data.get('date_to'):
-            date_value = form_data.get('date_to')
-            if isinstance(date_value, str):
-                date_value = dateutil.parser.parse(date_value).date()
-            qs = qs.filter(date__lte=date_value)
+        if form_data.get('date_range'):
+            d_start, d_end = resolve_timeframe_to_dates_inclusive(now(), form_data['date_range'], self.timezone)
+            if d_start:
+                qs = qs.filter(date__gte=d_start)
+            if d_end:
+                qs = qs.filter(date__lte=d_end)
 
         jo = {
             'Format': 'NREI',
@@ -218,21 +215,13 @@ class DekodiNREIExporter(BaseExporter):
     def export_form_fields(self):
         return OrderedDict(
             [
-                ('date_from',
-                 forms.DateField(
-                     label=gettext_lazy('Start date'),
-                     widget=forms.DateInput(attrs={'class': 'datepickerfield'}),
+                ('date_range',
+                 DateFrameField(
+                     label=gettext_lazy('Date range'),
+                     include_future_frames=False,
                      required=False,
-                     help_text=gettext_lazy('Only include invoices issued on or after this date. Note that the invoice date does '
+                     help_text=gettext_lazy('Only include invoices issued in this time frame. Note that the invoice date does '
                                             'not always correspond to the order or payment date.')
-                 )),
-                ('date_to',
-                 forms.DateField(
-                     label=gettext_lazy('End date'),
-                     widget=forms.DateInput(attrs={'class': 'datepickerfield'}),
-                     required=False,
-                     help_text=gettext_lazy('Only include invoices issued on or before this date. Note that the invoice date '
-                                            'does not always correspond to the order or payment date.')
                  )),
             ]
         )

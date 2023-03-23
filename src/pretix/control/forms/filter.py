@@ -57,14 +57,16 @@ from pretix.base.forms.widgets import (
 from pretix.base.models import (
     Checkin, CheckinList, Device, Event, EventMetaProperty, EventMetaValue,
     Gate, Invoice, InvoiceAddress, Item, Order, OrderPayment, OrderPosition,
-    OrderRefund, Organizer, Question, QuestionAnswer, SubEvent, Team,
-    TeamAPIToken, TeamInvite,
+    OrderRefund, Organizer, Question, QuestionAnswer, SubEvent,
+    SubEventMetaValue, Team, TeamAPIToken, TeamInvite, Voucher,
 )
 from pretix.base.signals import register_payment_providers
-from pretix.control.forms.widgets import Select2
+from pretix.control.forms.widgets import Select2, Select2ItemVarQuota
 from pretix.control.signals import order_search_filter_q
 from pretix.helpers.countries import CachedCountries
-from pretix.helpers.database import rolledback_transaction
+from pretix.helpers.database import (
+    get_deterministic_ordering, rolledback_transaction,
+)
 from pretix.helpers.dicts import move_to_end
 from pretix.helpers.i18n import i18ncomp
 
@@ -77,6 +79,31 @@ def get_all_payment_providers():
     if PAYMENT_PROVIDERS:
         return PAYMENT_PROVIDERS
 
+    class FakeSettings:
+        def __init__(self, orig_settings):
+            self.orig_settings = orig_settings
+
+        def set(self, *args, **kwargs):
+            pass
+
+        def __getattr__(self, item):
+            return getattr(self.orig_settings, item)
+
+    class FakeEvent:
+        def __init__(self, orig_event):
+            self.orig_event = orig_event
+
+        @property
+        def settings(self):
+            return FakeSettings(self.orig_event.settings)
+
+        def __getattr__(self, item):
+            return getattr(self.orig_event, item)
+
+        @property
+        def __class__(self):  # hackhack
+            return Event
+
     with rolledback_transaction():
         event = Event.objects.create(
             plugins=",".join([app.name for app in apps.get_app_configs()]),
@@ -84,6 +111,7 @@ def get_all_payment_providers():
             date_from=now(),
             organizer=Organizer.objects.create(name="INTERNAL")
         )
+        event = FakeEvent(event)
         provs = register_payment_providers.send(
             sender=event
         )
@@ -184,6 +212,7 @@ class OrderFilterForm(FilterForm):
             ('', _('All orders')),
             (_('Valid orders'), (
                 (Order.STATUS_PAID, _('Paid (or canceled with paid fee)')),
+                (Order.STATUS_PAID + 'v', _('Paid or confirmed')),
                 (Order.STATUS_PENDING, _('Pending')),
                 (Order.STATUS_PENDING + Order.STATUS_PAID, _('Pending or paid')),
             )),
@@ -270,6 +299,8 @@ class OrderFilterForm(FilterForm):
                 qs = qs.filter(status__in=[Order.STATUS_PENDING, Order.STATUS_PAID])
             elif s == 'ne':
                 qs = qs.filter(status__in=[Order.STATUS_PENDING, Order.STATUS_EXPIRED])
+            elif s == 'pv':
+                qs = qs.filter(Q(status=Order.STATUS_PAID) | Q(status=Order.STATUS_PENDING, valid_if_pending=True))
             elif s in ('p', 'n', 'e', 'c', 'r'):
                 qs = qs.filter(status=s)
             elif s == 'overpaid':
@@ -351,7 +382,7 @@ class OrderFilterForm(FilterForm):
                 )
 
         if fdata.get('ordering'):
-            qs = qs.order_by(self.get_order_by())
+            qs = qs.order_by(*get_deterministic_ordering(Order, self.get_order_by()))
 
         if fdata.get('provider'):
             qs = qs.annotate(
@@ -766,6 +797,12 @@ class OrderSearchFilterForm(OrderFilterForm):
                 )
             )
 
+    def use_query_hack(self):
+        return (
+            self.cleaned_data.get('query') or
+            self.cleaned_data.get('status') in ('overpaid', 'partially_paid', 'underpaid', 'pendingpaid')
+        )
+
     def filter_qs(self, qs):
         fdata = self.cleaned_data
         qs = super().filter_qs(qs)
@@ -806,7 +843,8 @@ class OrderSearchFilterForm(OrderFilterForm):
         # We ignore superuser permissions here. This is intentional – we do not want to show super
         # users a form with all meta properties ever assigned.
         return EventMetaProperty.objects.filter(
-            organizer_id__in=self.request.user.teams.values_list('organizer', flat=True)
+            organizer_id__in=self.request.user.teams.values_list('organizer', flat=True),
+            filter_allowed=True,
         )
 
 
@@ -1008,11 +1046,11 @@ class OrderPaymentSearchFilterForm(forms.Form):
         if fdata.get('ordering'):
             p = self.cleaned_data.get('ordering')
             if p.startswith('-') and p not in self.orders:
-                qs = qs.order_by('-' + self.orders[p[1:]])
+                qs = qs.order_by(*get_deterministic_ordering(OrderPayment, '-' + self.orders[p[1:]]))
             else:
-                qs = qs.order_by(self.orders[p])
+                qs = qs.order_by(*get_deterministic_ordering(OrderPayment, self.orders[p]))
         else:
-            qs = qs.order_by('-created')
+            qs = qs.order_by('-created', '-pk')
 
         return qs
 
@@ -1083,9 +1121,25 @@ class SubEventFilterForm(FilterForm):
     )
 
     def __init__(self, *args, **kwargs):
+        self.event = kwargs.pop('event')
         super().__init__(*args, **kwargs)
         self.fields['date_from'].widget = DatePickerWidget()
         self.fields['date_until'].widget = DatePickerWidget()
+        for p in self.meta_properties.all():
+            self.fields['meta_{}'.format(p.name)] = forms.CharField(
+                label=p.name,
+                required=False,
+                widget=forms.TextInput(
+                    attrs={
+                        'data-typeahead-url': reverse('control:event.subevents.meta.typeahead', kwargs={
+                            'organizer': self.event.organizer.slug,
+                            'event': self.event.slug
+                        }) + '?' + urlencode({
+                            'property': p.name,
+                        })
+                    }
+                )
+            )
 
     def filter_qs(self, qs):
         fdata = self.cleaned_data
@@ -1148,12 +1202,41 @@ class SubEventFilterForm(FilterForm):
         if fdata.get('time_from'):
             qs = qs.filter(date_from__time__gte=fdata.get('time_from'))
 
+        filters_by_property_name = {}
+        for i, p in enumerate(self.meta_properties):
+            d = fdata.get('meta_{}'.format(p.name))
+            if d:
+                semv_with_value = SubEventMetaValue.objects.filter(
+                    subevent=OuterRef('pk'),
+                    property__pk=p.pk,
+                    value=d
+                )
+                semv_with_any_value = SubEventMetaValue.objects.filter(
+                    subevent=OuterRef('pk'),
+                    property__pk=p.pk,
+                )
+                qs = qs.annotate(**{'attr_{}'.format(i): Exists(semv_with_value)})
+                if p.name in filters_by_property_name:
+                    filters_by_property_name[p.name] |= Q(**{'attr_{}'.format(i): True})
+                else:
+                    filters_by_property_name[p.name] = Q(**{'attr_{}'.format(i): True})
+                default = self.event.meta_data[p.name]
+                if default == d:
+                    qs = qs.annotate(**{'attr_{}_any'.format(i): Exists(semv_with_any_value)})
+                    filters_by_property_name[p.name] |= Q(**{'attr_{}_any'.format(i): False})
+        for f in filters_by_property_name.values():
+            qs = qs.filter(f)
+
         if fdata.get('ordering'):
-            qs = qs.order_by(self.get_order_by())
+            qs = qs.order_by(*get_deterministic_ordering(SubEvent, self.get_order_by()))
         else:
-            qs = qs.order_by('-date_from')
+            qs = qs.order_by('-date_from', '-pk')
 
         return qs
+
+    @cached_property
+    def meta_properties(self):
+        return self.event.organizer.meta_properties.filter(filter_allowed=True)
 
 
 class OrganizerFilterForm(FilterForm):
@@ -1381,9 +1464,7 @@ class TeamFilterForm(FilterForm):
             )
 
         if fdata.get('ordering'):
-            qs = qs.order_by(self.get_order_by())
-        else:
-            qs = qs.order_by('name')
+            qs = qs.order_by(*get_deterministic_ordering(Team, self.get_order_by()))
 
         return qs.distinct()
 
@@ -1538,19 +1619,20 @@ class EventFilterForm(FilterForm):
             qs = qs.filter(f)
 
         if fdata.get('ordering'):
-            qs = qs.order_by(self.get_order_by())
+            qs = qs.order_by(*get_deterministic_ordering(Event, self.get_order_by()))
 
         return qs
 
     @cached_property
     def meta_properties(self):
         if self.organizer:
-            return self.organizer.meta_properties.all()
+            return self.organizer.meta_properties.filter(filter_allowed=True)
         else:
             # We ignore superuser permissions here. This is intentional – we do not want to show super
             # users a form with all meta properties ever assigned.
             return EventMetaProperty.objects.filter(
-                organizer_id__in=self.request.user.teams.values_list('organizer', flat=True)
+                organizer_id__in=self.request.user.teams.values_list('organizer', flat=True),
+                filter_allowed=True,
             )
 
 
@@ -1669,9 +1751,7 @@ class CheckinListAttendeeFilterForm(FilterForm):
             if s == '1':
                 qs = qs.filter(last_entry__isnull=False)
             elif s == '2':
-                qs = qs.filter(last_entry__isnull=False).filter(
-                    Q(last_exit__isnull=True) | Q(last_exit__lt=F('last_entry'))
-                )
+                qs = qs.filter(pk__in=self.list.positions_inside.values_list('pk'))
             elif s == '3':
                 qs = qs.filter(last_entry__isnull=False).filter(
                     Q(last_exit__isnull=False) & Q(last_exit__gte=F('last_entry'))
@@ -1684,11 +1764,11 @@ class CheckinListAttendeeFilterForm(FilterForm):
             if isinstance(ob, dict):
                 ob = dict(ob)
                 o = ob.pop('_order')
-                qs = qs.annotate(**ob).order_by(o)
+                qs = qs.annotate(**ob).order_by(*get_deterministic_ordering(OrderPosition, [o]))
             elif isinstance(ob, (list, tuple)):
-                qs = qs.order_by(*ob)
+                qs = qs.order_by(*get_deterministic_ordering(OrderPosition, ob))
             else:
-                qs = qs.order_by(ob)
+                qs = qs.order_by(*get_deterministic_ordering(OrderPosition, [ob]))
 
         if fdata.get('item'):
             qs = qs.filter(item=fdata.get('item'))
@@ -1931,11 +2011,11 @@ class VoucherFilterForm(FilterForm):
             if isinstance(ob, dict):
                 ob = dict(ob)
                 o = ob.pop('_order')
-                qs = qs.annotate(**ob).order_by(o)
+                qs = qs.annotate(**ob).order_by(*get_deterministic_ordering(Voucher, o))
             elif isinstance(ob, (list, tuple)):
-                qs = qs.order_by(*ob)
+                qs = qs.order_by(*get_deterministic_ordering(Voucher, ob))
             else:
-                qs = qs.order_by(ob)
+                qs = qs.order_by(*get_deterministic_ordering(Voucher, ob))
 
         return qs
 
@@ -2018,9 +2098,7 @@ class RefundFilterForm(FilterForm):
                                       OrderRefund.REFUND_STATE_EXTERNAL])
 
         if fdata.get('ordering'):
-            qs = qs.order_by(self.get_order_by())
-        else:
-            qs = qs.order_by('-created')
+            qs = qs.order_by(*get_deterministic_ordering(OrderRefund, self.get_order_by()))
         return qs
 
 
@@ -2124,7 +2202,30 @@ class CheckinFilterForm(FilterForm):
         super().__init__(*args, **kwargs)
 
         self.fields['device'].queryset = self.event.organizer.devices.all().order_by('device_id')
+        self.fields['device'].widget = Select2(
+            attrs={
+                'data-model-select2': 'generic',
+                'data-select2-url': reverse('control:organizer.devices.select2', kwargs={
+                    'organizer': self.event.organizer.slug,
+                }),
+                'data-placeholder': _('All devices'),
+            }
+        )
+        self.fields['device'].widget.choices = self.fields['device'].choices
+        self.fields['device'].label = _('Device')
+
         self.fields['gate'].queryset = self.event.organizer.gates.all()
+        self.fields['gate'].widget = Select2(
+            attrs={
+                'data-model-select2': 'generic',
+                'data-select2-url': reverse('control:organizer.gates.select2', kwargs={
+                    'organizer': self.event.organizer.slug,
+                }),
+                'data-placeholder': _('All gates'),
+            }
+        )
+        self.fields['gate'].widget.choices = self.fields['gate'].choices
+        self.fields['gate'].label = _('Gate')
 
         self.fields['checkin_list'].queryset = self.event.checkin_lists.all()
         self.fields['checkin_list'].widget = Select2(
@@ -2150,6 +2251,20 @@ class CheckinFilterForm(FilterForm):
             else:
                 choices.append((str(i.pk), str(i)))
         self.fields['itemvar'].choices = choices
+
+        self.fields['itemvar'].choices = choices
+        self.fields['itemvar'].widget = Select2ItemVarQuota(
+            attrs={
+                'data-model-select2': 'generic',
+                'data-select2-url': reverse('control:event.items.itemvar.select2', kwargs={
+                    'event': self.event.slug,
+                    'organizer': self.event.organizer.slug,
+                }),
+                'data-placeholder': _('All products')
+            }
+        )
+        self.fields['itemvar'].required = False
+        self.fields['itemvar'].widget.choices = self.fields['itemvar'].choices
 
     def filter_qs(self, qs):
         fdata = self.cleaned_data
@@ -2230,7 +2345,7 @@ class DeviceFilterForm(FilterForm):
     state = forms.ChoiceField(
         label=_('Device status'),
         choices=[
-            ('', _('All devices')),
+            ('all', _('All devices')),
             ('active', _('Active devices')),
             ('revoked', _('Revoked devices'))
         ],

@@ -28,6 +28,7 @@ from typing import Dict, Optional, Tuple
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django_scopes import ScopedManager
 
@@ -115,7 +116,7 @@ class Discount(LoggedModel):
     condition_min_value = models.DecimalField(
         verbose_name=_('Minimum gross value of matching products'),
         decimal_places=2,
-        max_digits=10,
+        max_digits=13,
         default=Decimal('0.00'),
     )
 
@@ -197,6 +198,14 @@ class Discount(LoggedModel):
             'benefit_only_apply_to_cheapest_n_matches': self.benefit_only_apply_to_cheapest_n_matches,
             'subevent_mode': self.subevent_mode,
         })
+
+    def is_available_by_time(self, now_dt=None) -> bool:
+        now_dt = now_dt or now()
+        if self.available_from and self.available_from > now_dt:
+            return False
+        if self.available_until and self.available_until < now_dt:
+            return False
+        return True
 
     def _apply_min_value(self, positions, idx_group, result):
         if self.condition_min_value and sum(positions[idx][2] for idx in idx_group) < self.condition_min_value:
@@ -327,7 +336,7 @@ class Discount(LoggedModel):
                 candidates = []
                 cardinality = None
                 for se, l in subevent_to_idx.items():
-                    l = [ll for ll in l if ll not in current_group]
+                    l = [ll for ll in l if ll in initial_candidates and ll not in current_group]
                     if cardinality and len(l) != cardinality:
                         continue
                     if se not in {positions[idx][1] for idx in current_group}:

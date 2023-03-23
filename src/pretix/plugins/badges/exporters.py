@@ -32,10 +32,11 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
 
-import copy
 import json
+import logging
 from collections import OrderedDict
 from datetime import datetime, time, timedelta
+from decimal import Decimal
 from io import BytesIO
 from typing import Tuple
 
@@ -43,23 +44,29 @@ import dateutil.parser
 from django import forms
 from django.contrib.staticfiles import finders
 from django.core.files import File
+from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
-from django.db.models import Exists, OuterRef, Q
-from django.db.models.functions import Coalesce
+from django.db import DataError, models
+from django.db.models import Exists, OuterRef, Q, Subquery
+from django.db.models.functions import Cast, Coalesce
 from django.utils.timezone import make_aware
-from django.utils.translation import gettext as _, gettext_lazy
+from django.utils.translation import gettext as _, gettext_lazy, pgettext_lazy
+from pypdf import PdfMerger, PdfReader, PdfWriter, Transformation
+from pypdf.generic import RectangleObject
 from reportlab.lib import pagesizes
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
 from pretix.base.exporter import BaseExporter
 from pretix.base.i18n import language
-from pretix.base.models import Order, OrderPosition
+from pretix.base.models import Order, OrderPosition, Question, QuestionAnswer
 from pretix.base.pdf import Renderer
-from pretix.base.services.orders import OrderError
+from pretix.base.services.export import ExportError
 from pretix.base.settings import PERSON_NAME_SCHEMES
 from pretix.helpers.templatetags.jsonfield import JSONExtract
 from pretix.plugins.badges.models import BadgeItem, BadgeLayout
+
+logger = logging.getLogger(__name__)
 
 
 def _renderer(event, layout):
@@ -94,7 +101,7 @@ OPTIONS = OrderedDict([
         'cols': 2,
         'rows': 2,
         'margins': [0 * mm, 0 * mm, 0 * mm, 0 * mm],
-        'offsets': [pagesizes.portrait(pagesizes.A4)[0] / 2, pagesizes.portrait(pagesizes.A4)[0] / 2],
+        'offsets': [pagesizes.portrait(pagesizes.A4)[0] / 2, pagesizes.portrait(pagesizes.A4)[1] / 2],
         'pagesize': pagesizes.portrait(pagesizes.A4),
     }),
     ('a4_a7l', {
@@ -110,7 +117,7 @@ OPTIONS = OrderedDict([
         'cols': 4,
         'rows': 2,
         'margins': [0 * mm, 0 * mm, 0 * mm, 0 * mm],
-        'offsets': [pagesizes.landscape(pagesizes.A4)[0] / 4, pagesizes.landscape(pagesizes.A4)[0] / 2],
+        'offsets': [pagesizes.landscape(pagesizes.A4)[0] / 4, pagesizes.landscape(pagesizes.A4)[1] / 2],
         'pagesize': pagesizes.landscape(pagesizes.A4),
     }),
     ('durable_54x90', {
@@ -153,11 +160,26 @@ OPTIONS = OrderedDict([
         'offsets': [95 * mm, 55 * mm],
         'pagesize': pagesizes.A4,
     }),
+    ('herma_40x40', {
+        'name': 'HERMA 40 x 40 mm (9642)',
+        'cols': 4,
+        'rows': 6,
+        'margins': [13.5 * mm, 15 * mm, 13.5 * mm, 15 * mm],
+        'offsets': [46 * mm, 46 * mm],
+        'pagesize': pagesizes.A4,
+    }),
+    ('lyreco_70x36', {
+        'name': 'Lyreco 70 x 36 mm (143.344)',
+        'cols': 3,
+        'rows': 8,
+        'margins': [4.5 * mm, 0 * mm, 4.5 * mm, 0 * mm],
+        'offsets': [70 * mm, 36 * mm],
+        'pagesize': pagesizes.A4,
+    }),
 ])
 
 
 def render_pdf(event, positions, opt):
-    from PyPDF2 import PdfFileReader, PdfFileWriter
     Renderer._register_fonts()
 
     renderermap = {
@@ -168,72 +190,74 @@ def render_pdf(event, positions, opt):
         default_renderer = _renderer(event, event.badge_layouts.get(default=True))
     except BadgeLayout.DoesNotExist:
         default_renderer = None
-    output_pdf_writer = PdfFileWriter()
 
-    any = False
-    npp = opt['cols'] * opt['rows']
+    op_renderers = [(op, renderermap.get(op.item_id, default_renderer)) for op in positions if renderermap.get(op.item_id, default_renderer)]
+    if not len(op_renderers):
+        raise ExportError(_("None of the selected products is configured to print badges."))
 
-    def render_page(positions):
-        buffer = BytesIO()
-        p = canvas.Canvas(buffer, pagesize=pagesizes.A4)
-        for i, (op, r) in enumerate(positions):
-            offsetx = opt['margins'][3] + (i % opt['cols']) * opt['offsets'][0]
-            offsety = opt['margins'][2] + (opt['rows'] - 1 - i // opt['cols']) * opt['offsets'][1]
-            p.translate(offsetx, offsety)
-            with language(op.order.locale, op.order.event.settings.region):
-                r.draw_page(p, op.order, op, show_page=False, only_page=1)
-            p.translate(-offsetx, -offsety)
-
-        if opt['pagesize']:
-            p.setPageSize(opt['pagesize'])
-        p.showPage()
-        p.save()
-        buffer.seek(0)
-        canvas_pdf_reader = PdfFileReader(buffer)
-        empty_pdf_page = output_pdf_writer.addBlankPage(
-            width=opt['pagesize'][0] if opt['pagesize'] else positions[0][1].bg_pdf.getPage(0).mediaBox[2],
-            height=opt['pagesize'][1] if opt['pagesize'] else positions[0][1].bg_pdf.getPage(0).mediaBox[3],
-        )
-        for i, (op, r) in enumerate(positions):
-            bg_page = copy.copy(r.bg_pdf.getPage(0))
-            offsetx = opt['margins'][3] + (i % opt['cols']) * opt['offsets'][0]
-            offsety = opt['margins'][2] + (opt['rows'] - 1 - i // opt['cols']) * opt['offsets'][1]
-            empty_pdf_page.mergeTranslatedPage(
-                bg_page,
-                tx=offsetx,
-                ty=offsety
-            )
-        empty_pdf_page.mergePage(canvas_pdf_reader.getPage(0))
-
-    pagebuffer = []
-    outbuffer = BytesIO()
-    for op in positions:
-        r = renderermap.get(op.item_id, default_renderer)
-        if not r:
-            continue
-        any = True
-        pagebuffer.append((op, r))
-        if len(pagebuffer) == npp:
-            render_page(pagebuffer)
-            pagebuffer.clear()
-
-    if pagebuffer:
-        render_page(pagebuffer)
-
-    output_pdf_writer.addMetadata({
+    # render each badge on its own page first
+    merger = PdfMerger()
+    merger.add_metadata({
         '/Title': 'Badges',
         '/Creator': 'pretix',
     })
-    output_pdf_writer.write(outbuffer)
+    for op, renderer in op_renderers:
+        buffer = BytesIO()
+        page = canvas.Canvas(buffer, pagesize=pagesizes.A4)
+        with language(op.order.locale, op.order.event.settings.region):
+            renderer.draw_page(page, op.order, op)
+
+        if opt['pagesize']:
+            page.setPageSize(opt['pagesize'])
+        page.save()
+        buffer = renderer.render_background(buffer, _('Badge'))
+        merger.append(ContentFile(buffer.read()))
+
+    outbuffer = BytesIO()
+    merger.write(outbuffer)
     outbuffer.seek(0)
-    if not any:
-        raise OrderError(_("None of the selected products is configured to print badges."))
+
+    badges_per_page = opt['cols'] * opt['rows']
+    if badges_per_page == 1:
+        # no need to place multiple badges on one page
+        return outbuffer
+
+    # place n-up badges/pages per page
+    badges_pdf = PdfReader(outbuffer)
+    nup_pdf = PdfWriter()
+    nup_page = None
+    for i, page in enumerate(badges_pdf.pages):
+        di = i % badges_per_page
+        if di == 0:
+            nup_page = nup_pdf.add_blank_page(
+                width=Decimal('%.5f' % (opt['pagesize'][0])),
+                height=Decimal('%.5f' % (opt['pagesize'][1])),
+            )
+        tx = opt['margins'][3] + (di % opt['cols']) * opt['offsets'][0]
+        ty = opt['margins'][2] + (opt['rows'] - 1 - (di // opt['cols'])) * opt['offsets'][1]
+        page.add_transformation(Transformation().translate(tx, ty))
+        page.mediabox = RectangleObject((
+            Decimal('%.5f' % (page.mediabox.left.as_numeric() + tx)),
+            Decimal('%.5f' % (page.mediabox.bottom.as_numeric() + ty)),
+            Decimal('%.5f' % (page.mediabox.right.as_numeric() + tx)),
+            Decimal('%.5f' % (page.mediabox.top.as_numeric() + ty))
+        ))
+        page.trimbox = page.mediabox
+        nup_page.merge_page(page)
+
+    outbuffer = BytesIO()
+    nup_pdf.write(outbuffer)
+    outbuffer.seek(0)
+
     return outbuffer
 
 
 class BadgeExporter(BaseExporter):
     identifier = "badges"
     verbose_name = _("Attendee badges")
+    category = pgettext_lazy('export_category', 'PDF collections')
+    description = gettext_lazy('Download all attendee badges as one large PDF for printing.')
+    featured = True
 
     @property
     def export_form_fields(self):
@@ -296,7 +320,16 @@ class BadgeExporter(BaseExporter):
                      ] + ([
                          ('name:{}'.format(k), _('Attendee name: {part}').format(part=label))
                          for k, label, w in name_scheme['fields']
-                     ] if len(name_scheme['fields']) > 1 else []),
+                     ] if len(name_scheme['fields']) > 1 else []) + ([
+                         ('question:{}'.format(q.identifier), _('Question: {question}').format(question=q.question))
+                         for q in self.event.questions.filter(type__in=(
+                             # All except TYPE_FILE and future ones
+                             Question.TYPE_TIME, Question.TYPE_TEXT, Question.TYPE_DATE, Question.TYPE_BOOLEAN,
+                             Question.TYPE_COUNTRYCODE, Question.TYPE_DATETIME, Question.TYPE_NUMBER,
+                             Question.TYPE_PHONENUMBER, Question.TYPE_STRING, Question.TYPE_CHOICE,
+                             Question.TYPE_CHOICE_MULTIPLE
+                         ))
+                     ] if not self.is_multievent else []),
                  )),
             ]
         )
@@ -315,7 +348,7 @@ class BadgeExporter(BaseExporter):
         if form_data.get('include_pending'):
             qs = qs.filter(order__status__in=[Order.STATUS_PAID, Order.STATUS_PENDING])
         else:
-            qs = qs.filter(order__status__in=[Order.STATUS_PAID])
+            qs = qs.filter(Q(order__status=Order.STATUS_PAID) | Q(order__status=Order.STATUS_PENDING, order__valid_if_pending=True))
 
         if form_data.get('date_from'):
             dt = make_aware(datetime.combine(
@@ -347,6 +380,54 @@ class BadgeExporter(BaseExporter):
             ).order_by(
                 'resolved_name_part'
             )
+        elif form_data.get('order_by', '').startswith('question:'):
+            part = form_data['order_by'].split(':', 1)[1]
+            question = self.event.questions.get(identifier=part)
+            if question.type == Question.TYPE_NUMBER:
+                # We use a database-level type cast to sort numbers like 1, 2, 10, 11 and not like 1, 10, 11, 2.
+                # This works perfectly fine e.g. on SQLite where an invalid number will be casted to 0, but will
+                # raise a DataError on PostgreSQL if there is a non-number in the data.
+                question_subquery = Subquery(
+                    QuestionAnswer.objects.filter(
+                        orderposition_id=OuterRef('pk'),
+                        question_id=question.pk,
+                    ).annotate(
+                        converted_answer=Cast('answer', output_field=models.FloatField())
+                    ).order_by().values('converted_answer')[:1]
+                )
+            elif question.type in (Question.TYPE_CHOICE, Question.TYPE_CHOICE_MULTIPLE):
+                # Sorting by choice questions must be handled differently because the QuestionAnswer.value
+                # attribute may be dependent on the submitters locale, which we don't want here. So we sort by
+                # order of the position instead. In case of multiple choice, the first selected order counts, which
+                # is not perfect but better than no sorting at all.
+                question_subquery = Subquery(
+                    QuestionAnswer.options.through.objects.filter(
+                        questionanswer__orderposition_id=OuterRef('pk'),
+                        questionanswer__question_id=question.pk,
+                    ).order_by('questionoption__position').values('questionoption__position')[:1]
+                )
+            else:
+                # For all other types, we just sort by treating the answer field as a string. This works fine for
+                # all string-y types including dates and date-times (due to ISO 8601 format), country codes, etc
+                question_subquery = Subquery(
+                    QuestionAnswer.objects.filter(
+                        orderposition_id=OuterRef('pk'),
+                        question_id=question.pk,
+                    ).order_by().values('answer')[:1]
+                )
 
-        outbuffer = render_pdf(self.event, qs, OPTIONS[form_data.get('rendering', 'one')])
+            qs = qs.annotate(
+                question_answer=question_subquery,
+            ).order_by(
+                'question_answer'
+            )
+
+        try:
+            outbuffer = render_pdf(self.event, qs, OPTIONS[form_data.get('rendering', 'one')])
+        except DataError:
+            logging.exception('DataError during export')
+            raise ExportError(
+                _('Your data could not be converted as requested. This could be caused by invalid values in your '
+                  'databases, such as answers to number questions which are not a number.')
+            )
         return 'badges.pdf', 'application/pdf', outbuffer.read()

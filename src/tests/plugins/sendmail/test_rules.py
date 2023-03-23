@@ -28,7 +28,7 @@ from django.core import mail as djmail
 from django.utils.timezone import now, utc
 from django_scopes import scopes_disabled
 
-from pretix.base.models import Order
+from pretix.base.models import InvoiceAddress, Order
 from pretix.plugins.sendmail.models import Rule, ScheduledMail
 from pretix.plugins.sendmail.signals import sendmail_run_rules
 
@@ -303,6 +303,22 @@ def test_sendmail_rule_send_order_pending_excluded(event, order):
 
 
 @pytest.mark.django_db
+@scopes_disabled()
+def test_sendmail_rule_send_order_valid_if_pending(event, order):
+    order.valid_if_pending = True
+    order.status = Order.STATUS_PENDING
+    order.save()
+    djmail.outbox = []
+
+    event.sendmail_rules.create(send_date=dt_now - datetime.timedelta(hours=1), include_pending=False,
+                                subject='meow', template='meow meow meow')
+
+    sendmail_run_rules(None)
+
+    assert len(djmail.outbox) == 1
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize('status', [
     Order.STATUS_EXPIRED,
     Order.STATUS_CANCELED,
@@ -361,3 +377,22 @@ def test_sendmail_rule_disabled(event, order):
 
     sendmail_run_rules(None)
     assert len(djmail.outbox) == 0
+
+
+@pytest.mark.django_db
+@scopes_disabled()
+def test_sendmail_context_localization(event, order, pos):
+    order.locale = 'de'
+    order.save()
+    event.settings.name_scheme = 'salutation_given_family'
+    InvoiceAddress.objects.create(
+        order=order,
+        name_parts={'_scheme': 'salutation_given_family', 'salutation': 'Mr', 'given_name': 'Max', 'family_name': 'Mustermann'}
+    )
+
+    djmail.outbox = []
+    event.sendmail_rules.create(send_date=dt_now - datetime.timedelta(hours=1), include_pending=True,
+                                subject='meow', template='Hallo {name_for_salutation}')
+
+    sendmail_run_rules(None)
+    assert "Hallo Herr Mustermann" in djmail.outbox[0].body

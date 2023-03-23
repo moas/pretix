@@ -12,16 +12,22 @@ on:
       - 'src/pretix/locale/**'
       - 'src/pretix/static/**'
 
+permissions:
+  contents: read  #  to fetch code (actions/checkout)
+
+env:
+  FORCE_COLOR: 1
+
 jobs:
   isort:
     name: isort
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v2
-      - name: Set up Python 3.8
+      - name: Set up Python 3.11
         uses: actions/setup-python@v1
         with:
-          python-version: 3.8
+          python-version: 3.11
       - uses: actions/cache@v1
         with:
           path: ~/.cache/pip
@@ -36,13 +42,13 @@ jobs:
         working-directory: ./src
   flake:
     name: flake8
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v2
-      - name: Set up Python 3.8
+      - name: Set up Python 3.11
         uses: actions/setup-python@v1
         with:
-          python-version: 3.8
+          python-version: 3.11
       - uses: actions/cache@v1
         with:
           path: ~/.cache/pip
@@ -57,13 +63,13 @@ jobs:
         working-directory: ./src
   licenseheader:
     name: licenseheaders
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v2
-      - name: Set up Python 3.8
+      - name: Set up Python 3.11
         uses: actions/setup-python@v1
         with:
-          python-version: 3.8
+          python-version: 3.11
       - name: Install Dependencies
         run: pip3 install licenseheaders
       - name: Run licenseheaders

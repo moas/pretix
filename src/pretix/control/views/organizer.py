@@ -34,9 +34,11 @@
 
 import json
 import re
-from datetime import timedelta
+from datetime import time, timedelta
 from decimal import Decimal
+from hashlib import sha1
 
+import bleach
 from django import forms
 from django.conf import settings
 from django.contrib import messages
@@ -44,32 +46,36 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.files import File
 from django.db import connections, transaction
 from django.db.models import (
-    Count, Exists, IntegerField, Max, Min, OuterRef, Prefetch, ProtectedError,
-    Q, Subquery, Sum,
+    Count, Exists, F, IntegerField, Max, Min, OuterRef, Prefetch,
+    ProtectedError, Q, Subquery, Sum,
 )
 from django.db.models.functions import Coalesce, Greatest
 from django.forms import DecimalField
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
+from django.utils.formats import date_format
 from django.utils.functional import cached_property
-from django.utils.timezone import now
-from django.utils.translation import gettext_lazy as _
+from django.utils.timezone import get_current_timezone, now
+from django.utils.translation import gettext, gettext_lazy as _
 from django.views import View
 from django.views.generic import (
     CreateView, DeleteView, DetailView, FormView, ListView, TemplateView,
     UpdateView,
 )
 
-from pretix.api.models import WebHook
+from pretix.api.models import ApiCall, WebHook
+from pretix.api.webhooks import manually_retry_all_calls
 from pretix.base.auth import get_auth_backends
 from pretix.base.channels import get_all_sales_channels
+from pretix.base.exporter import OrganizerLevelExportMixin
 from pretix.base.i18n import language
 from pretix.base.models import (
     CachedFile, Customer, Device, Gate, GiftCard, Invoice, LogEntry,
     Membership, MembershipType, Order, OrderPayment, OrderPosition, Organizer,
-    Team, TeamInvite, User,
+    ScheduledOrganizerExport, Team, TeamInvite, User,
 )
+from pretix.base.models.customers import CustomerSSOClient, CustomerSSOProvider
 from pretix.base.models.event import Event, EventMetaProperty, EventMetaValue
 from pretix.base.models.giftcards import (
     GiftCardTransaction, gen_giftcard_secret,
@@ -77,12 +83,13 @@ from pretix.base.models.giftcards import (
 from pretix.base.models.orders import CancellationRequest
 from pretix.base.models.organizer import TeamAPIToken
 from pretix.base.payment import PaymentException
-from pretix.base.services.export import multiexport
+from pretix.base.services.export import multiexport, scheduled_organizer_export
 from pretix.base.services.mail import SendMailException, mail
 from pretix.base.settings import SETTINGS_AFFECTING_CSS
 from pretix.base.signals import register_multievent_data_exporters
 from pretix.base.templatetags.rich_text import markdown_compile_email
 from pretix.base.views.tasks import AsyncAction
+from pretix.control.forms.exports import ScheduledOrganizerExportForm
 from pretix.control.forms.filter import (
     CustomerFilterForm, DeviceFilterForm, EventFilterForm, GiftCardFilterForm,
     OrganizerFilterForm, TeamFilterForm,
@@ -92,9 +99,11 @@ from pretix.control.forms.organizer import (
     CustomerCreateForm, CustomerUpdateForm, DeviceBulkEditForm, DeviceForm,
     EventMetaPropertyForm, GateForm, GiftCardCreateForm, GiftCardUpdateForm,
     MailSettingsForm, MembershipTypeForm, MembershipUpdateForm,
-    OrganizerDeleteForm, OrganizerForm, OrganizerSettingsForm,
-    OrganizerUpdateForm, TeamForm, WebHookForm,
+    OrganizerDeleteForm, OrganizerFooterLinkFormset, OrganizerForm,
+    OrganizerSettingsForm, OrganizerUpdateForm, SSOClientForm, SSOProviderForm,
+    TeamForm, WebHookForm,
 )
+from pretix.control.forms.rrule import RRuleForm
 from pretix.control.logdisplay import OVERVIEW_BANLIST
 from pretix.control.permissions import (
     AdministratorPermissionRequiredMixin, OrganizerPermissionRequiredMixin,
@@ -102,8 +111,10 @@ from pretix.control.permissions import (
 from pretix.control.signals import nav_organizer
 from pretix.control.views import PaginationMixin
 from pretix.control.views.mailsetup import MailSettingsSetupView
-from pretix.helpers import GroupConcat
+from pretix.helpers import OF_SELF, GroupConcat
+from pretix.helpers.compat import CompatDeleteView
 from pretix.helpers.dicts import merge_dicts
+from pretix.helpers.format import format_map
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
 from pretix.presale.forms.customer import TokenGenerator
@@ -200,7 +211,7 @@ class OrganizerDetail(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin
         ctx = super().get_context_data(**kwargs)
         ctx['filter_form'] = self.filter_form
         ctx['meta_fields'] = [
-            self.filter_form['meta_{}'.format(p.name)] for p in self.organizer.meta_properties.all()
+            self.filter_form['meta_{}'.format(p.name)] for p in self.organizer.meta_properties.filter(filter_allowed=True)
         ]
         return ctx
 
@@ -320,7 +331,7 @@ class MailSettingsPreview(OrganizerPermissionRequiredMixin, View):
         if preview_item not in MailSettingsForm.base_context:
             return HttpResponseBadRequest(_('invalid item'))
 
-        regex = r"^" + re.escape(preview_item) + r"_(?P<idx>[\d+])$"
+        regex = r"^" + re.escape(preview_item) + r"_(?P<idx>[\d]+)$"
         msgs = {}
         for k, v in request.POST.items():
             # only accept allowed fields
@@ -329,9 +340,12 @@ class MailSettingsPreview(OrganizerPermissionRequiredMixin, View):
                 idx = matched.group('idx')
                 if idx in self.supported_locale:
                     with language(self.supported_locale[idx], self.request.organizer.settings.region):
-                        msgs[self.supported_locale[idx]] = markdown_compile_email(
-                            v.format_map(self.placeholders(preview_item))
-                        )
+                        if k.startswith('mail_subject_'):
+                            msgs[self.supported_locale[idx]] = format_map(bleach.clean(v), self.placeholders(preview_item))
+                        else:
+                            msgs[self.supported_locale[idx]] = markdown_compile_email(
+                                format_map(v, self.placeholders(preview_item))
+                            )
 
         return JsonResponse({
             'item': preview_item,
@@ -380,9 +394,23 @@ class OrganizerDelete(AdministratorPermissionRequiredMixin, FormView):
                 self.request.organizer.delete()
             messages.success(self.request, _('The organizer has been deleted.'))
             return redirect(self.get_success_url())
-        except ProtectedError:
-            messages.error(self.request, _('The organizer could not be deleted as some constraints (e.g. data created by '
-                                           'plug-ins) do not allow it.'))
+        except ProtectedError as e:
+            err = gettext('The organizer could not be deleted as some constraints (e.g. data created by plug-ins) do not allow it.')
+
+            # Unlike deleting events (which is done by regular backend users), this feature can only be used by sysadmins,
+            # so we expose more technical / less polished information.
+            affected_models = set()
+            for m in e.protected_objects:
+                affected_models.add(type(m)._meta.label)
+
+            if affected_models:
+                err += ' ' + gettext(
+                    'The following database models still contain data that cannot be deleted automatically: {affected_models}'
+                ).format(
+                    affected_models=', '.join(list(affected_models))
+                )
+
+            messages.error(self.request, err)
             return self.get(self.request, *self.args, **self.kwargs)
 
     def get_success_url(self) -> str:
@@ -416,11 +444,13 @@ class OrganizerUpdate(OrganizerPermissionRequiredMixin, UpdateView):
     def get_context_data(self, *args, **kwargs) -> dict:
         context = super().get_context_data(*args, **kwargs)
         context['sform'] = self.sform
+        context['footer_links_formset'] = self.footer_links_formset
         return context
 
     @transaction.atomic
     def form_valid(self, form):
         self.sform.save()
+        self.save_footer_links_formset(self.object)
         change_css = False
         if self.sform.has_changed():
             self.request.organizer.log_action(
@@ -435,6 +465,10 @@ class OrganizerUpdate(OrganizerPermissionRequiredMixin, UpdateView):
             )
             if any(p in self.sform.changed_data for p in SETTINGS_AFFECTING_CSS):
                 change_css = True
+        if self.footer_links_formset.has_changed():
+            self.request.organizer.log_action('pretix.organizer.footerlinks.changed', user=self.request.user, data={
+                'data': self.footer_links_formset.cleaned_data
+            })
         if form.has_changed():
             self.request.organizer.log_action(
                 'pretix.organizer.changed',
@@ -466,10 +500,18 @@ class OrganizerUpdate(OrganizerPermissionRequiredMixin, UpdateView):
     def post(self, request, *args, **kwargs):
         self.object = self.get_object()
         form = self.get_form()
-        if form.is_valid() and self.sform.is_valid():
+        if form.is_valid() and self.sform.is_valid() and self.footer_links_formset.is_valid():
             return self.form_valid(form)
         else:
             return self.form_invalid(form)
+
+    @cached_property
+    def footer_links_formset(self):
+        return OrganizerFooterLinkFormset(self.request.POST if self.request.method == "POST" else None, organizer=self.object,
+                                          prefix="footer-links", instance=self.object)
+
+    def save_footer_links_formset(self, obj):
+        self.footer_links_formset.save()
 
 
 class OrganizerCreate(CreateView):
@@ -514,7 +556,7 @@ class TeamListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, P
             memcount=Count('members', distinct=True),
             eventcount=Count('limit_events', distinct=True),
             invcount=Count('invites', distinct=True)
-        ).all().order_by('name')
+        ).all().order_by('name', 'pk')
         if self.filter_form.is_valid():
             qs = self.filter_form.filter_qs(qs)
         return qs
@@ -600,7 +642,7 @@ class TeamUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
         return super().form_invalid(form)
 
 
-class TeamDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DeleteView):
+class TeamDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CompatDeleteView):
     model = Team
     template_name = 'pretixcontrol/organizers/team_delete.html'
     permission = 'can_change_teams'
@@ -628,14 +670,25 @@ class TeamDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
     def delete(self, request, *args, **kwargs):
         success_url = self.get_success_url()
         self.object = self.get_object()
-        if self.is_allowed():
-            self.object.log_action('pretix.team.deleted', user=self.request.user)
-            self.object.delete()
-            messages.success(request, _('The selected team has been deleted.'))
-            return redirect(success_url)
-        else:
+        if not self.is_allowed():
             messages.error(request, _('The selected team cannot be deleted.'))
             return redirect(success_url)
+
+        try:
+            self.object.log_action('pretix.team.deleted', user=self.request.user)
+            self.object.delete()
+        except ProtectedError:
+            messages.error(
+                self.request,
+                _(
+                    'The team could not be deleted as some constraints (e.g. data created by '
+                    'plug-ins) do not allow it.'
+                )
+            )
+            return redirect(success_url)
+
+        messages.success(request, _('The selected team has been deleted.'))
+        return redirect(success_url)
 
 
 class TeamMemberView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DetailView):
@@ -825,12 +878,19 @@ class DeviceQueryMixin:
     @cached_property
     def request_data(self):
         if self.request.method == "POST":
-            return self.request.POST
-        return self.request.GET
+            d = self.request.POST
+        else:
+            d = self.request.GET
+        d = d.copy()
+        d.setdefault('state', 'active')
+        return d
 
     @cached_property
     def filter_form(self):
-        return DeviceFilterForm(data=self.request.GET, request=self.request)
+        return DeviceFilterForm(
+            data=self.request_data,
+            request=self.request,
+        )
 
     def get_queryset(self):
         qs = self.request.organizer.devices.prefetch_related(
@@ -944,6 +1004,15 @@ class DeviceUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixi
                 k: getattr(self.object, k) if k != 'limit_events' else [e.id for e in getattr(self.object, k).all()]
                 for k in form.changed_data
             })
+
+            # If the permission of the device have changed, let's clear "permission denied" errors from the idempotency store
+            auth_hash_parts = f'Device {self.object.api_token}:'
+            auth_hash = sha1(auth_hash_parts.encode()).hexdigest()
+            ApiCall.objects.filter(
+                auth_hash=auth_hash,
+                response_code=403,
+            ).delete()
+
         messages.success(self.request, _('Your changes have been saved.'))
         return super().form_valid(form)
 
@@ -1227,6 +1296,7 @@ class WebHookLogsView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['webhook'] = self.webhook
+        ctx['retry_count'] = self.webhook.retries.count()
         return ctx
 
     @cached_property
@@ -1237,6 +1307,25 @@ class WebHookLogsView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin
 
     def get_queryset(self):
         return self.webhook.calls.order_by('-datetime')
+
+    def post(self, request, *args, **kwargs):
+        if request.POST.get("action") == "expedite":
+            self.request.organizer.log_action('pretix.webhook.retries.expedited', user=self.request.user, data={
+                'webhook': self.webhook.pk,
+            })
+            manually_retry_all_calls.apply_async(args=(self.webhook.pk,))
+            messages.success(request, _('All requests will now be scheduled for an immediate attempt. Please '
+                                        'allow for a few minutes before they are processed.'))
+        elif request.POST.get("action") == "drop":
+            self.request.organizer.log_action('pretix.webhook.retries.dropped', user=self.request.user, data={
+                'webhook': self.webhook.pk,
+            })
+            self.webhook.retries.all().delete()
+            messages.success(request, _('All unprocessed webhooks have been stopped from retrying.'))
+        return redirect(reverse('control:organizer.webhook.logs', kwargs={
+            'organizer': self.request.organizer.slug,
+            'webhook': self.webhook.pk,
+        }))
 
 
 class GiftCardListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, ListView):
@@ -1316,7 +1405,7 @@ class GiftCardDetailView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMi
 
     @transaction.atomic()
     def post(self, request, *args, **kwargs):
-        self.object = GiftCard.objects.select_for_update().get(pk=self.get_object().pk)
+        self.object = GiftCard.objects.select_for_update(of=OF_SELF).get(pk=self.get_object().pk)
         if 'revert' in request.POST:
             t = get_object_or_404(self.object.transactions.all(), pk=request.POST.get('revert'), order__isnull=False)
             if self.object.value - t.value < Decimal('0.00'):
@@ -1350,7 +1439,7 @@ class GiftCardDetailView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMi
                     messages.error(request, _('The transaction could not be reversed.'))
                 else:
                     messages.success(request, _('The transaction has been reversed.'))
-        elif 'value' in request.POST:
+        elif request.POST.get('value'):
             try:
                 value = DecimalField(localize=True).to_python(request.POST.get('value'))
             except ValidationError:
@@ -1453,24 +1542,34 @@ class GiftCardUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMi
 
 class ExportMixin:
     @cached_property
-    def exporters(self):
-        exporters = []
-        events = self.request.user.get_events_with_permission('can_view_orders', request=self.request).filter(
-            organizer=self.request.organizer
-        )
-        responses = register_multievent_data_exporters.send(self.request.organizer)
-        id = self.request.GET.get("identifier") or self.request.POST.get("exporter")
-        for ex in sorted([response(events, self.request.organizer) for r, response in responses if response], key=lambda ex: str(ex.verbose_name)):
-            if id and ex.identifier != id:
+    def exporter(self):
+        id = self.request.GET.get("identifier") or self.request.POST.get("exporter") or self.request.GET.get("exporter")
+        if not id:
+            return None
+        for ex in self.exporters:
+            if id != ex.identifier:
                 continue
+            if self.scheduled:
+                initial = dict(self.scheduled.export_form_data)
 
-            # Use form parse cycle to generate useful defaults
-            test_form = ExporterForm(data=self.request.GET, prefix=ex.identifier)
-            test_form.fields = ex.export_form_fields
-            test_form.is_valid()
-            initial = {
-                k: v for k, v in test_form.cleaned_data.items() if ex.identifier + "-" + k in self.request.GET
-            }
+                test_form = ExporterForm(data=self.request.GET, prefix=ex.identifier)
+                test_form.fields = ex.export_form_fields
+                for k in initial:
+                    if initial[k] and k in test_form.fields:
+                        try:
+                            initial[k] = test_form.fields[k].to_python(initial[k])
+                        except Exception:
+                            pass
+            else:
+                # Use form parse cycle to generate useful defaults
+                test_form = ExporterForm(data=self.request.GET, prefix=ex.identifier)
+                test_form.fields = ex.export_form_fields
+                test_form.is_valid()
+                initial = {
+                    k: v for k, v in test_form.cleaned_data.items() if ex.identifier + "-" + k in self.request.GET
+                }
+                if 'events' not in initial:
+                    initial.setdefault('all_events', True)
 
             ex.form = ExporterForm(
                 data=(self.request.POST if self.request.method == 'POST' else None),
@@ -1478,31 +1577,80 @@ class ExportMixin:
                 initial=initial
             )
             ex.form.fields = ex.export_form_fields
-            ex.form.fields.update([
-                ('events',
-                 forms.ModelMultipleChoiceField(
-                     queryset=events,
-                     initial=events,
-                     widget=forms.CheckboxSelectMultiple(
-                         attrs={'class': 'scrolling-multiple-choice'}
-                     ),
-                     label=_('Events'),
-                     required=True
-                 )),
-            ])
-            exporters.append(ex)
-        return exporters
+            if not isinstance(ex, OrganizerLevelExportMixin):
+                ex.form.fields.update([
+                    ('all_events',
+                     forms.BooleanField(
+                         label=_("All events (that I have access to)"),
+                         required=False
+                     )),
+                    ('events',
+                     forms.ModelMultipleChoiceField(
+                         queryset=self.events,
+                         widget=forms.CheckboxSelectMultiple(
+                             attrs={
+                                 'class': 'scrolling-multiple-choice',
+                                 'data-inverse-dependency': f'#id_{ex.identifier}-all_events',
+                             }
+                         ),
+                         label=_('Events'),
+                         required=False
+                     )),
+                ])
+            return ex
+
+    @cached_property
+    def events(self):
+        return self.request.user.get_events_with_permission('can_view_orders', request=self.request).filter(
+            organizer=self.request.organizer
+        )
+
+    @cached_property
+    def exporters(self):
+        responses = register_multievent_data_exporters.send(self.request.organizer)
+        raw_exporters = [
+            response(Event.objects.none() if issubclass(response, OrganizerLevelExportMixin) else self.events, self.request.organizer)
+            for r, response in responses
+            if response
+        ]
+        raw_exporters = [
+            ex for ex in raw_exporters
+            if (
+                not isinstance(ex, OrganizerLevelExportMixin) or
+                self.request.user.has_organizer_permission(self.request.organizer, ex.organizer_required_permission, self.request)
+            )
+        ]
+        return sorted(
+            raw_exporters,
+            key=lambda ex: (0 if ex.category else 1, ex.category or "", 0 if ex.featured else 1, str(ex.verbose_name).lower())
+        )
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
+        ctx['exporter'] = self.exporter
         ctx['exporters'] = self.exporters
         return ctx
+
+    def get_scheduled_queryset(self):
+        if not self.request.user.has_organizer_permission(self.request.organizer, 'can_change_organizer_settings',
+                                                          request=self.request):
+            qs = self.request.organizer.scheduled_exports.filter(owner=self.request.user)
+        else:
+            qs = self.request.organizer.scheduled_exports
+        return qs.select_related('owner').order_by('export_identifier', 'schedule_next_run')
+
+    @cached_property
+    def scheduled(self):
+        if "scheduled" in self.request.POST:
+            return get_object_or_404(self.get_scheduled_queryset(), pk=self.request.POST.get("scheduled"))
+        elif "scheduled" in self.request.GET:
+            return get_object_or_404(self.get_scheduled_queryset(), pk=self.request.GET.get("scheduled"))
 
 
 class ExportDoView(OrganizerPermissionRequiredMixin, ExportMixin, AsyncAction, TemplateView):
     known_errortypes = ['ExportError']
     task = multiexport
-    template_name = 'pretixcontrol/organizers/export.html'
+    template_name = 'pretixcontrol/organizers/export_form.html'
 
     def get_success_message(self, value):
         return None
@@ -1514,12 +1662,6 @@ class ExportDoView(OrganizerPermissionRequiredMixin, ExportMixin, AsyncAction, T
         return reverse('control:organizer.export', kwargs={
             'organizer': self.request.organizer.slug
         })
-
-    @cached_property
-    def exporter(self):
-        for ex in self.exporters:
-            if ex.identifier == self.request.POST.get("exporter"):
-                return ex
 
     def get(self, request, *args, **kwargs):
         if 'async_id' in request.GET and settings.HAS_CELERY:
@@ -1533,9 +1675,13 @@ class ExportDoView(OrganizerPermissionRequiredMixin, ExportMixin, AsyncAction, T
                 'organizer': self.request.organizer.slug
             })
 
-        if not self.exporter.form.is_valid():
-            messages.error(self.request, _('There was a problem processing your input. See below for error details.'))
-            return self.get(request, *args, **kwargs)
+        if self.scheduled:
+            data = self.scheduled.export_form_data
+        else:
+            if not self.exporter.form.is_valid():
+                messages.error(self.request, _('There was a problem processing your input. See below for error details.'))
+                return self.get(request, *args, **kwargs)
+            data = self.exporter.form.cleaned_data
 
         cf = CachedFile(web_download=True, session_key=request.session.session_key)
         cf.date = now()
@@ -1548,13 +1694,151 @@ class ExportDoView(OrganizerPermissionRequiredMixin, ExportMixin, AsyncAction, T
             provider=self.exporter.identifier,
             device=None,
             token=None,
-            form_data=self.exporter.form.cleaned_data,
+            form_data=data,
             staff_session=self.request.user.has_active_staff_session(self.request.session.session_key)
         )
 
 
-class ExportView(OrganizerPermissionRequiredMixin, ExportMixin, TemplateView):
-    template_name = 'pretixcontrol/organizers/export.html'
+class ExportView(OrganizerPermissionRequiredMixin, ExportMixin, ListView):
+    paginate_by = 25
+    context_object_name = 'scheduled'
+
+    def get_template_names(self):
+        if self.exporter:
+            return ['pretixcontrol/organizers/export_form.html']
+        return ['pretixcontrol/organizers/export.html']
+
+    @transaction.atomic()
+    def post(self, request, *args, **kwargs):
+        if request.POST.get("schedule") == "save":
+            if self.exporter.form.is_valid() and self.rrule_form.is_valid() and self.schedule_form.is_valid():
+                self.schedule_form.instance.export_identifier = self.exporter.identifier
+                self.schedule_form.instance.export_form_data = self.exporter.form.cleaned_data
+                self.schedule_form.instance.schedule_rrule = str(self.rrule_form.to_rrule())
+                self.schedule_form.instance.error_counter = 0
+                self.schedule_form.instance.error_last_message = None
+                self.schedule_form.instance.compute_next_run()
+                self.schedule_form.instance.save()
+                if self.schedule_form.instance.schedule_next_run:
+                    messages.success(
+                        request,
+                        _('Your export schedule has been saved. The next export will start around {datetime}.').format(
+                            datetime=date_format(self.schedule_form.instance.schedule_next_run, 'SHORT_DATETIME_FORMAT')
+                        )
+                    )
+                else:
+                    messages.warning(request, _('Your export schedule has been saved, but no next export is planned.'))
+                self.request.organizer.log_action(
+                    'pretix.organizer.export.schedule.changed' if self.scheduled else 'pretix.organizer.export.schedule.added',
+                    user=self.request.user, data={
+                        'id': self.schedule_form.instance.id,
+                        'export_identifier': self.exporter.identifier,
+                        'export_form_data': self.exporter.form.cleaned_data,
+                        'schedule_rrule': self.schedule_form.instance.schedule_rrule,
+                        **self.schedule_form.cleaned_data,
+                    }
+                )
+                return redirect(reverse('control:organizer.export', kwargs={
+                    'organizer': self.request.organizer.slug
+                }))
+            else:
+                return super().get(request, *args, **kwargs)
+        return super().get(request, *args, **kwargs)
+
+    @cached_property
+    def rrule_form(self):
+        if self.scheduled:
+            initial = RRuleForm.initial_from_rrule(self.scheduled.schedule_rrule)
+        else:
+            initial = {}
+        return RRuleForm(
+            data=self.request.POST if self.request.method == 'POST' and self.request.POST.get("schedule") == "save" else None,
+            prefix="rrule",
+            initial=initial
+        )
+
+    @cached_property
+    def schedule_form(self):
+        instance = self.scheduled or ScheduledOrganizerExport(
+            organizer=self.request.organizer,
+            owner=self.request.user,
+            timezone=get_current_timezone().zone,
+        )
+        if not self.scheduled:
+            initial = {
+                "mail_subject": gettext("Export: {title}").format(title=self.exporter.verbose_name),
+                "mail_template": gettext("Hello,\n\nattached to this email, you can find a new scheduled report for {name}.").format(
+                    name=str(self.request.organizer.name)
+                ),
+                "schedule_rrule_time": time(4, 0, 0),
+            }
+        else:
+            initial = {}
+        return ScheduledOrganizerExportForm(
+            data=self.request.POST if self.request.method == 'POST' and self.request.POST.get("schedule") == "save" else None,
+            prefix="schedule",
+            instance=instance,
+            initial=initial,
+        )
+
+    def get_queryset(self):
+        return self.get_scheduled_queryset()
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        if "schedule" in self.request.POST or self.scheduled:
+            ctx['schedule_form'] = self.schedule_form
+            ctx['rrule_form'] = self.rrule_form
+        elif not self.exporter:
+            for s in ctx['scheduled']:
+                try:
+                    s.export_verbose_name = [e for e in self.exporters if e.identifier == s.export_identifier][0].verbose_name
+                except IndexError:
+                    s.export_verbose_name = "?"
+        return ctx
+
+
+class DeleteScheduledExportView(OrganizerPermissionRequiredMixin, ExportMixin, DeleteView):
+    template_name = 'pretixcontrol/organizers/export_delete.html'
+    context_object_name = 'export'
+
+    def get_queryset(self):
+        return self.get_scheduled_queryset()
+
+    def get_success_url(self):
+        return reverse('control:organizer.export', kwargs={
+            'organizer': self.request.organizer.slug
+        })
+
+    @transaction.atomic()
+    def delete(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        self.object.delete()
+        self.request.organizer.log_action('pretix.organizer.export.schedule.deleted', user=self.request.user, data={
+            'id': self.object.id,
+        })
+        return redirect(self.get_success_url())
+
+
+class RunScheduledExportView(OrganizerPermissionRequiredMixin, ExportMixin, View):
+
+    def post(self, request, *args, **kwargs):
+        s = get_object_or_404(self.get_scheduled_queryset(), pk=kwargs.get('pk'))
+        scheduled_organizer_export.apply_async(
+            kwargs={
+                'organizer': s.organizer_id,
+                'schedule': s.pk,
+            },
+            # Scheduled exports usually run on the low-prio queue "background" but if they're manually triggered,
+            # we run them with normal priority
+            queue='default',
+        )
+        messages.success(self.request, _('Your export is queued to start soon. The results will be send via email. '
+                                         'Depending on system load and type and size of export, this may take a few '
+                                         'minutes.'))
+        return redirect(reverse('control:organizer.export', kwargs={
+            'organizer': self.request.organizer.slug
+        }))
 
 
 class GateListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, ListView):
@@ -1634,7 +1918,7 @@ class GateUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
         return super().form_invalid(form)
 
 
-class GateDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DeleteView):
+class GateDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CompatDeleteView):
     model = Gate
     template_name = 'pretixcontrol/organizers/gate_delete.html'
     permission = 'can_change_organizer_settings'
@@ -1725,7 +2009,7 @@ class EventMetaPropertyUpdateView(OrganizerDetailViewMixin, OrganizerPermissionR
         return super().form_invalid(form)
 
 
-class EventMetaPropertyDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DeleteView):
+class EventMetaPropertyDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CompatDeleteView):
     model = EventMetaProperty
     template_name = 'pretixcontrol/organizers/property_delete.html'
     permission = 'can_change_organizer_settings'
@@ -1756,6 +2040,8 @@ class LogView(OrganizerPermissionRequiredMixin, PaginationMixin, ListView):
     context_object_name = 'logs'
 
     def get_queryset(self):
+        # technically, we'd also need to sort by pk since this is a paginated list, but in this case we just can't
+        # bear the performance cost
         qs = self.request.organizer.all_logentries().select_related(
             'user', 'content_type', 'api_token', 'oauth_application', 'device'
         ).order_by('-datetime')
@@ -1848,7 +2134,7 @@ class MembershipTypeUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequ
         return super().form_invalid(form)
 
 
-class MembershipTypeDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DeleteView):
+class MembershipTypeDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CompatDeleteView):
     model = MembershipType
     template_name = 'pretixcontrol/organizers/membershiptype_delete.html'
     permission = 'can_change_organizer_settings'
@@ -1873,6 +2159,247 @@ class MembershipTypeDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequ
         self.object = self.get_object()
         if self.object.allow_delete():
             self.object.log_action('pretix.membershiptype.deleted', user=self.request.user)
+            self.object.delete()
+            messages.success(request, _('The selected object has been deleted.'))
+        return redirect(success_url)
+
+
+class SSOProviderListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, ListView):
+    model = CustomerSSOProvider
+    template_name = 'pretixcontrol/organizers/ssoproviders.html'
+    permission = 'can_change_organizer_settings'
+    context_object_name = 'providers'
+
+    def get_queryset(self):
+        return self.request.organizer.sso_providers.all()
+
+
+class SSOProviderCreateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CreateView):
+    model = CustomerSSOProvider
+    template_name = 'pretixcontrol/organizers/ssoprovider_edit.html'
+    permission = 'can_change_organizer_settings'
+    form_class = SSOProviderForm
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(CustomerSSOProvider, organizer=self.request.organizer, pk=self.kwargs.get('provider'))
+
+    def get_success_url(self):
+        return reverse('control:organizer.ssoproviders', kwargs={
+            'organizer': self.request.organizer.slug,
+        })
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['event'] = self.request.organizer
+        return kwargs
+
+    def form_valid(self, form):
+        messages.success(self.request, _('The provider has been created.'))
+        form.instance.organizer = self.request.organizer
+        ret = super().form_valid(form)
+        form.instance.log_action('pretix.ssoprovider.created', user=self.request.user, data={
+            k: getattr(self.object, k, self.object.configuration.get(k)) for k in form.changed_data
+        })
+        return ret
+
+    def form_invalid(self, form):
+        messages.error(self.request, _('Your changes could not be saved.'))
+        return super().form_invalid(form)
+
+
+class SSOProviderUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, UpdateView):
+    model = CustomerSSOProvider
+    template_name = 'pretixcontrol/organizers/ssoprovider_edit.html'
+    permission = 'can_change_organizer_settings'
+    context_object_name = 'provider'
+    form_class = SSOProviderForm
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(CustomerSSOProvider, organizer=self.request.organizer, pk=self.kwargs.get('provider'))
+
+    def get_success_url(self):
+        return reverse('control:organizer.ssoproviders', kwargs={
+            'organizer': self.request.organizer.slug,
+        })
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx['redirect_uri'] = build_absolute_uri(self.request.organizer, 'presale:organizer.customer.login.return', kwargs={
+            'provider': self.object.pk
+        })
+        return ctx
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['event'] = self.request.organizer
+        return kwargs
+
+    def form_valid(self, form):
+        if form.has_changed():
+            self.object.log_action('pretix.ssoprovider.changed', user=self.request.user, data={
+                k: getattr(self.object, k, self.object.configuration.get(k)) for k in form.changed_data
+            })
+        messages.success(self.request, _('Your changes have been saved.'))
+        return super().form_valid(form)
+
+    def form_invalid(self, form):
+        messages.error(self.request, _('Your changes could not be saved.'))
+        return super().form_invalid(form)
+
+
+class SSOProviderDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CompatDeleteView):
+    model = CustomerSSOProvider
+    template_name = 'pretixcontrol/organizers/ssoprovider_delete.html'
+    permission = 'can_change_organizer_settings'
+    context_object_name = 'provider'
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(CustomerSSOProvider, organizer=self.request.organizer, pk=self.kwargs.get('provider'))
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx['is_allowed'] = self.object.allow_delete()
+        return ctx
+
+    def get_success_url(self):
+        return reverse('control:organizer.ssoproviders', kwargs={
+            'organizer': self.request.organizer.slug,
+        })
+
+    @transaction.atomic
+    def delete(self, request, *args, **kwargs):
+        success_url = self.get_success_url()
+        self.object = self.get_object()
+        if self.object.allow_delete():
+            self.object.log_action('pretix.ssoprovider.deleted', user=self.request.user)
+            self.object.delete()
+            messages.success(request, _('The selected object has been deleted.'))
+        return redirect(success_url)
+
+
+class SSOClientListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, ListView):
+    model = CustomerSSOClient
+    template_name = 'pretixcontrol/organizers/ssoclients.html'
+    permission = 'can_change_organizer_settings'
+    context_object_name = 'clients'
+
+    def get_queryset(self):
+        return self.request.organizer.sso_clients.all()
+
+
+class SSOClientCreateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CreateView):
+    model = CustomerSSOClient
+    template_name = 'pretixcontrol/organizers/ssoclient_edit.html'
+    permission = 'can_change_organizer_settings'
+    form_class = SSOClientForm
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(CustomerSSOClient, organizer=self.request.organizer, pk=self.kwargs.get('client'))
+
+    def get_success_url(self):
+        return reverse('control:organizer.ssoclient.edit', kwargs={
+            'organizer': self.request.organizer.slug,
+            'client': self.object.pk
+        })
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['event'] = self.request.organizer
+        return kwargs
+
+    def form_valid(self, form):
+        secret = form.instance.set_client_secret()
+        messages.success(
+            self.request,
+            _('The SSO client has been created. Please note down the following client secret, it will never be shown '
+              'again: {secret}').format(secret=secret)
+        )
+        form.instance.organizer = self.request.organizer
+        ret = super().form_valid(form)
+        form.instance.log_action('pretix.ssoclient.created', user=self.request.user, data={
+            k: getattr(self.object, k, form.cleaned_data.get(k)) for k in form.changed_data
+        })
+        return ret
+
+    def form_invalid(self, form):
+        messages.error(self.request, _('Your changes could not be saved.'))
+        return super().form_invalid(form)
+
+
+class SSOClientUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, UpdateView):
+    model = CustomerSSOClient
+    template_name = 'pretixcontrol/organizers/ssoclient_edit.html'
+    permission = 'can_change_organizer_settings'
+    context_object_name = 'client'
+    form_class = SSOClientForm
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(CustomerSSOClient, organizer=self.request.organizer, pk=self.kwargs.get('client'))
+
+    def get_success_url(self):
+        return reverse('control:organizer.ssoclient.edit', kwargs={
+            'organizer': self.request.organizer.slug,
+            'client': self.object.pk
+        })
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        return ctx
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['event'] = self.request.organizer
+        return kwargs
+
+    def form_valid(self, form):
+        if form.has_changed():
+            self.object.log_action('pretix.ssoclient.changed', user=self.request.user, data={
+                k: getattr(self.object, k, form.cleaned_data.get(k)) for k in form.changed_data
+            })
+        if form.cleaned_data.get('regenerate_client_secret'):
+            secret = form.instance.set_client_secret()
+            messages.success(
+                self.request,
+                _('Your changes have been saved. Please note down the following client secret, it will never be shown '
+                  'again: {secret}').format(secret=secret)
+            )
+        else:
+            messages.success(
+                self.request,
+                _('Your changes have been saved.')
+            )
+        return super().form_valid(form)
+
+    def form_invalid(self, form):
+        messages.error(self.request, _('Your changes could not be saved.'))
+        return super().form_invalid(form)
+
+
+class SSOClientDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CompatDeleteView):
+    model = CustomerSSOClient
+    template_name = 'pretixcontrol/organizers/ssoclient_delete.html'
+    permission = 'can_change_organizer_settings'
+    context_object_name = 'client'
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(CustomerSSOClient, organizer=self.request.organizer, pk=self.kwargs.get('client'))
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx['is_allowed'] = self.object.allow_delete()
+        return ctx
+
+    def get_success_url(self):
+        return reverse('control:organizer.ssoclients', kwargs={
+            'organizer': self.request.organizer.slug,
+        })
+
+    @transaction.atomic
+    def delete(self, request, *args, **kwargs):
+        success_url = self.get_success_url()
+        self.object = self.get_object()
+        if self.object.allow_delete():
+            self.object.log_action('pretix.ssoclient.deleted', user=self.request.user)
             self.object.delete()
             messages.success(request, _('The selected object has been deleted.'))
         return redirect(success_url)
@@ -1907,12 +2434,12 @@ class CustomerDetailView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMi
 
     def get_queryset(self):
         q = Q(customer=self.customer)
-        if self.request.organizer.settings.customer_accounts_link_by_email:
+        if self.request.organizer.settings.customer_accounts_link_by_email and self.customer.email:
             # This is safe because we only let customers with verified emails log in
             q |= Q(email__iexact=self.customer.email)
         qs = Order.objects.filter(
             q
-        ).select_related('event').order_by('-datetime')
+        ).select_related('event').order_by('-datetime', 'pk')
         return qs
 
     @cached_property
@@ -1923,7 +2450,7 @@ class CustomerDetailView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMi
         )
 
     def post(self, request, *args, **kwargs):
-        if request.POST.get('action') == 'pwreset':
+        if request.POST.get('action') == 'pwreset' and self.customer.provider_id is None:
             self.customer.log_action('pretix.customer.password.resetrequested', {}, user=self.request.user)
             ctx = self.customer.get_email_context()
             token = TokenGenerator().make_token(self.customer)
@@ -1933,7 +2460,7 @@ class CustomerDetailView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMi
             ) + '?id=' + self.customer.identifier + '&token=' + token
             mail(
                 self.customer.email,
-                _('Set a new password for your account at {organizer}').format(organizer=self.request.organizer.name),
+                self.request.organizer.settings.mail_subject_customer_reset,
                 self.request.organizer.settings.mail_text_customer_reset,
                 ctx,
                 locale=self.customer.locale,
@@ -2003,6 +2530,14 @@ class CustomerDetailView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMi
             o.computed_payment_refund_sum = annotated.get(o.pk)['computed_payment_refund_sum']
             o.icnt = annotated.get(o.pk)['icnt']
             o.sales_channel_obj = scs[o.sales_channel]
+
+        ctx["lifetime_spending"] = (
+            self.get_queryset()
+            .filter(status=Order.STATUS_PAID)
+            .values(currency=F("event__currency"))
+            .order_by("currency")
+            .annotate(spending=Sum("total"))
+        )
 
         return ctx
 
@@ -2103,7 +2638,7 @@ class MembershipUpdateView(OrganizerDetailViewMixin, OrganizerPermissionRequired
         })
 
 
-class MembershipDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DeleteView):
+class MembershipDeleteView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CompatDeleteView):
     template_name = 'pretixcontrol/organizers/customer_membership_delete.html'
     permission = 'can_manage_customers'
     context_object_name = 'membership'

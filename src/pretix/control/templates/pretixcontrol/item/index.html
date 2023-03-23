@@ -27,13 +27,19 @@
                                 {% endfor %}
                                 <div class="big-radio radio">
                                     <label>
-                                        <input type="radio" value="on" name="{{ form.admission.html_name }}" {% if form.admission.value %}checked{% endif %}>
+                                        <input type="radio" value="on" name="{{ form.admission.html_name }}" {% if form.admission.value %}checked{% endif %} id="admission_on">
                                         <span class="fa fa-fw fa-user"></span>
                                         <strong>{% trans "Admission product" %}</strong><br>
                                         <div class="help-block">
                                             {% blocktrans trimmed %}
                                                 Every purchase of this product represents one person who is allowed to enter your event.
-                                                By default, pretix will only ask for attendee information and offer ticket downloads for these products.
+                                                By default, we will only offer ticket downloads for these products.
+                                            {% endblocktrans %}
+                                        </div>
+                                        <div class="help-block">
+                                            {% blocktrans trimmed %}
+                                                Only purchases of such products will be considered "attendees" for most statistical
+                                                purposes or within some plugins.
                                             {% endblocktrans %}
                                         </div>
                                         <div class="help-block">
@@ -51,13 +57,59 @@
                                         <strong>{% trans "Non-admission product" %}</strong>
                                         <div class="help-block">
                                             {% blocktrans trimmed %}
-                                                A product that does not represent a person. By default, pretix will not ask for attendee information or offer
-                                                ticket downloads.
+                                                A product that does not represent a person. By default, we will not offer ticket downloads
+                                                (but you can still enable ticket downloads in event settings or product settings).
                                             {% endblocktrans %}
                                         </div>
                                         <div class="help-block">
                                             {% blocktrans trimmed %}
                                                 Examples: Merchandise, donations, gift cards, add-ons to a main ticket.
+                                            {% endblocktrans %}
+                                        </div>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-group" data-display-dependency="#admission_on">
+                            <label class="col-md-3 control-label">{% trans "Personalization" %}</label>
+                            <div class="col-md-9">
+                                {% for e in form.errors.personalized %}
+                                    <div class="alert alert-danger has-error">
+                                        {{ e }}
+                                    </div>
+                                {% endfor %}
+                                <div class="big-radio radio">
+                                    <label>
+                                        <input type="radio" value="on" name="{{ form.personalized.html_name }}" {% if form.personalized.value %}checked{% endif %}>
+                                        <span class="fa fa-fw fa-id-card-o"></span>
+                                        <strong>{% trans "Personalized ticket" %}</strong><br>
+                                        <div class="help-block">
+                                            {% blocktrans trimmed %}
+                                                When this ticket is purchased, the system will ask for a name or other details according
+                                                to your event settings.
+                                            {% endblocktrans %}
+                                            {% if not request.event.settings.attendee_names_asked and not request.event.settings.attendee_emails_asked and not request.event.settings.attendee_company_asked and not request.event.settings.attendee_addresses_asked %}
+                                                <br>
+                                                <span class="text-warning">
+                                                    <span class="fa fa-warning" aria-hidden="true"></span>
+                                                    {% trans "This will currently have no effect since all data fields are turned off in event settings." %}
+                                                </span>
+                                                <a href="{% url "control:event.settings" organizer=request.event.organizer.slug event=request.event.slug %}#tab-0-2-open"
+                                                   class="btn btn-default btn-xs" target="_blank">{% trans "Change settings" %}</a>
+                                            {% endif %}
+                                        </div>
+                                    </label>
+                                </div>
+                                <div class="big-radio radio">
+                                    <label>
+                                        <input type="radio" value="" name="{{ form.personalized.html_name }}" {% if not form.personalized.value %}checked{% endif %}>
+                                        <span class="fa fa-fw fa-file-text-o"></span>
+                                        <strong>{% trans "Non-personalized ticket" %}</strong>
+                                        <div class="help-block">
+                                            {% blocktrans trimmed %}
+                                                The system will not ask for a name or other attendee details. This only affects
+                                                system-provided fields, you can still add your own questions.
                                             {% endblocktrans %}
                                         </div>
                                     </label>
@@ -124,14 +176,55 @@
                         </fieldset>
                     {% endfor %}
                     <fieldset>
-                        <legend>{% trans "Tickets & check-in" %}</legend>
+                        <legend>{% trans "Tickets & Badges" %}</legend>
                         {% bootstrap_field form.generate_tickets layout="control" %}
+                        {% for f in plugin_forms %}
+                            {% if f.is_layouts %}
+                                {% bootstrap_form f layout="control" %}
+                            {% endif %}
+                        {% endfor %}
+                    </fieldset>
+                    <fieldset>
+                        <legend>{% trans "Check-in & Validity" %}</legend>
                         {% bootstrap_field form.checkin_attention layout="control" %}
+                        {% bootstrap_field form.validity_mode layout="control" %}
+                        <div data-display-dependency="#{{ form.validity_mode.id_for_label }}" data-display-dependency-value="fixed">
+                            {% bootstrap_field form.validity_fixed_from layout="control" %}
+                            {% bootstrap_field form.validity_fixed_until layout="control" %}
+                        </div>
+                        <div data-display-dependency="#{{ form.validity_mode.id_for_label }}" data-display-dependency-value="dynamic">
+                            <div class="form-group metadata-group">
+                                <label class="col-md-3 control-label">{% trans "Duration" %}</label>
+                                <div class="col-md-9">
+                                    {% trans "minutes" as t_minutes %}
+                                    {% trans "hours" as t_hours %}
+                                    {% trans "days" as t_days %}
+                                    {% trans "months" as t_months %}
+                                    {% trans "years" as t_years %}
+                                    {% bootstrap_field form.validity_dynamic_duration_months layout="control" addon_after=t_months horizontal_field_class="" horizontal_label_class="sr-only" %}
+                                    {% bootstrap_field form.validity_dynamic_duration_days layout="control" addon_after=t_days addon_before="+" horizontal_field_class="" horizontal_label_class="sr-only" %}
+                                    {% bootstrap_field form.validity_dynamic_duration_hours layout="control" addon_after=t_hours addon_before="+" horizontal_field_class="" horizontal_label_class="sr-only" %}
+                                    {% bootstrap_field form.validity_dynamic_duration_minutes layout="control" addon_after=t_minutes addon_before="+" horizontal_field_class="" horizontal_label_class="sr-only" %}
+                                    <div class="help-block">
+                                        {% blocktrans trimmed %}
+                                            If you select a duration given in days, months or years, the validity will always end at the
+                                            end of a full day (midnight), plus the number of minutes and hours selected above.
+                                            The start date is included in the calculation, so if you enter "1 day", the ticket
+                                            will be valid until the end of the day it starts on.
+                                        {% endblocktrans %}
+                                    </div>
+                                </div>
+                            </div>
+                            {% bootstrap_field form.validity_dynamic_start_choice layout="control" %}
+                            <div data-display-dependency="#{{ form.validity_dynamic_start_choice.id_for_label }}">
+                                {% trans "days" as t_days %}
+                                {% bootstrap_field form.validity_dynamic_start_choice_day_limit addon_after=t_days layout="control" %}
+                            </div>
+                        </div>
                     </fieldset>
                     <fieldset>
                         <legend>{% trans "Additional settings" %}</legend>
                         {% bootstrap_field form.issue_giftcard layout="control" %}
-                        {% bootstrap_field form.show_quota_left layout="control" %}
                         {% if form.grant_membership_type %}
                             {% bootstrap_field form.grant_membership_type layout="control" %}
                             <div data-display-dependency="#id_grant_membership_type">
@@ -154,8 +247,11 @@
                                 </div>
                             </div>
                         {% endif %}
+                        {% bootstrap_field form.show_quota_left layout="control" %}
                         {% for f in plugin_forms %}
-                            {% bootstrap_form f layout="control" %}
+                            {% if not f.is_layouts %}
+                                {% bootstrap_form f layout="control" %}
+                            {% endif %}
                         {% endfor %}
                     </fieldset>
                 </div>

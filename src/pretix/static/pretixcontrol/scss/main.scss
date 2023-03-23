@@ -31,6 +31,7 @@ footer {
 
 nav.navbar {
     margin: 0;
+    border: 0;
 }
 .navbar-brand img {
     height: 100%;
@@ -110,6 +111,9 @@ h1 .btn-sm {
 .container-fluid > .alert:first-child {
     margin-top: 20px;
 }
+.alert h2 {
+    margin-top: 0;
+}
 
 .flipped-scroll-wrapper {
     overflow-y: auto;
@@ -156,6 +160,12 @@ p.bigger {
 .helper-space-below {
     margin-bottom: 10px;
 }
+.text-h1 { font-size: $font-size-h1; }
+.text-h2 { font-size: $font-size-h2; }
+.text-h3 { font-size: $font-size-h3; }
+.text-h4 { font-size: $font-size-h4; }
+.text-h5 { font-size: $font-size-h5; }
+.text-h6 { font-size: $font-size-h6; }
 
 .section-moved {
     margin: 20px 0;
@@ -470,6 +480,14 @@ td > .dl-horizontal {
     word-wrap: break-word;
 }
 
+.alert > dl:last-child,
+td > p:last-child,
+.panel-body > dl:last-child,
+.panel-body > .table:last-child,
+.panel-body > .table-responsive:last-child > .table:last-child {
+    margin-bottom: 0;
+}
+
 .fa.disabled {
     color: $text-muted;
 }
@@ -486,11 +504,16 @@ td > .dl-horizontal {
     padding: 15px;
 }
 
+.old-browser-warning {
+    padding: 32px;/* 30px + 2px optical compensation */
+    font-size: 30px;
+}
+
 @media(min-width:768px) {
     .impersonate-warning, .old-browser-warning {
         position: inherit;
         margin: 0 0 0 250px;
-        padding: 15px 30px;
+        padding: 15px 47px;/* 45px + 2px optical compensation */
     }
 }
 
@@ -569,16 +592,17 @@ td > .dl-horizontal {
         width: 70%;
         margin: auto;
 
-        .fa {
+        & > .fa {
             float: left;
             margin-right: 30px;
+            margin-left: 0;
         }
 
         h2 {
             padding-top: 25px;
         }
 
-        p {
+        & > * {
             margin-left: 158px;
         }
     }
@@ -767,6 +791,27 @@ tbody[data-dnd-url] {
 }
 tbody th {
     background: $table-bg-hover;
+}
+
+.large-link-group {
+    a.list-group-item {
+        &::before {
+            font-family: FontAwesome;
+            font-size: 30px;
+            content: $fa-var-chevron-right;
+            float: right;
+            color: $link-color;
+        }
+        h4 {
+            color: $link-color;
+        }
+        &:hover &::before {
+            color: $link-hover-color;
+        }
+        &:hover h4 {
+            color: $link-hover-color;
+        }
+    }
 }
 
 

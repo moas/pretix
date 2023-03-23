@@ -68,12 +68,6 @@ from pretix.helpers.money import change_decimal_field
 
 
 class ExtendForm(I18nModelForm):
-    quota_ignore = forms.BooleanField(
-        label=_('Overbook quota'),
-        help_text=_('If you check this box, this operation will be performed even if it leads to an overbooked quota '
-                    'and you having sold more tickets than you planned!'),
-        required=False
-    )
     expires = forms.DateField(
         label=_("Expiration date"),
         widget=forms.DateInput(attrs={
@@ -81,16 +75,35 @@ class ExtendForm(I18nModelForm):
             'data-is-payment-date': 'true'
         }),
     )
+    valid_if_pending = forms.BooleanField(
+        label=_('Confirm order regardless of payment'),
+        help_text=_('If you check this box, this order will behave like a paid order for most purposes, even though it '
+                    'is not yet paid. This means that the customer can already download and use tickets regardless '
+                    'of your event settings, and the order might be treated as paid by some plugins. If you check '
+                    'this, this order will not be marked as "expired" automatically if the payment deadline arrives, '
+                    'since we expect that you want to collect the amount somehow and not auto-cancel the order.'),
+        required=False
+    )
+    quota_ignore = forms.BooleanField(
+        label=_('Overbook quota'),
+        help_text=_('If you check this box, this operation will be performed even if it leads to an overbooked quota '
+                    'and you having sold more tickets than you planned!'),
+        required=False
+    )
 
     class Meta:
         model = Order
         fields = []
 
     def __init__(self, *args, **kwargs):
+        kwargs.setdefault('initial', {})
+        kwargs['initial'].setdefault('valid_if_pending', kwargs['instance'].valid_if_pending)
+        kwargs['initial'].setdefault('expires', kwargs['instance'].expires)
         super().__init__(*args, **kwargs)
-        if self.instance.status == Order.STATUS_PENDING or self.instance._is_still_available(now(),
-                                                                                             count_waitinglist=False)\
-                is True:
+        if (
+            self.instance.status == Order.STATUS_PENDING or
+            self.instance._is_still_available(now(), count_waitinglist=False) is True
+        ):
             del self.fields['quota_ignore']
 
     def clean(self):
@@ -154,11 +167,11 @@ class CancelForm(ForceQuotaConfirmationForm):
     )
     cancellation_fee = forms.DecimalField(
         required=False,
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         localize=True,
         label=_('Keep a cancellation fee of'),
         help_text=_('If you keep a fee, all positions within this order will be canceled and the order will be reduced '
-                    'to a paid cancellation fee. Payment and shipping fees will be canceled as well, so include them '
+                    'to a cancellation fee. Payment and shipping fees will be canceled as well, so include them '
                     'in your cancellation fee if you want to keep them. Please always enter a gross value, '
                     'tax will be calculated automatically.'),
     )
@@ -176,23 +189,19 @@ class CancelForm(ForceQuotaConfirmationForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        prs = self.instance.payment_refund_sum
-        if prs > 0:
-            change_decimal_field(self.fields['cancellation_fee'], self.instance.event.currency)
-            self.fields['cancellation_fee'].widget.attrs['placeholder'] = floatformat(
-                Decimal('0.00'),
-                settings.CURRENCY_PLACES.get(self.instance.event.currency, 2)
-            )
-            self.fields['cancellation_fee'].max_value = prs
-        else:
-            del self.fields['cancellation_fee']
+        change_decimal_field(self.fields['cancellation_fee'], self.instance.event.currency)
+        self.fields['cancellation_fee'].widget.attrs['placeholder'] = floatformat(
+            Decimal('0.00'),
+            settings.CURRENCY_PLACES.get(self.instance.event.currency, 2)
+        )
+        self.fields['cancellation_fee'].max_value = self.instance.total
         if not self.instance.invoices.exists():
             del self.fields['cancel_invoice']
 
     def clean_cancellation_fee(self):
         val = self.cleaned_data['cancellation_fee'] or Decimal('0.00')
-        if val > self.instance.payment_refund_sum:
-            raise ValidationError(_('The cancellation fee cannot be higher than the payment credit of this order.'))
+        if val > self.instance.total:
+            raise ValidationError(_('The cancellation fee cannot be higher than the total amount of this order.'))
         return val
 
 
@@ -204,7 +213,7 @@ class MarkPaidForm(ConfirmPaymentForm):
     )
     amount = forms.DecimalField(
         required=True,
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         localize=True,
         label=_('Payment amount'),
     )
@@ -230,6 +239,10 @@ class ExporterForm(forms.Form):
                 data[k] = v.pk
             elif isinstance(v, models.QuerySet):
                 data[k] = [m.pk for m in v]
+
+        if 'all_events' in self.fields and 'events' in self.fields:
+            if not data.get('all_events') and not data.get('events'):
+                raise ValidationError(_('Please select some events.'))
 
         return data
 
@@ -270,7 +283,7 @@ class OtherOperationsForm(forms.Form):
     notify = forms.BooleanField(
         label=_('Notify user'),
         required=False,
-        initial=True,
+        initial=False,
         help_text=_(
             'Send an email to the customer notifying that their order has been changed.'
         )
@@ -305,7 +318,7 @@ class OrderPositionAddForm(forms.Form):
     )
     price = forms.DecimalField(
         required=False,
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         localize=True,
         label=_('Gross price'),
         help_text=_("Including taxes, if any. Keep empty for the product's default price")
@@ -431,9 +444,23 @@ class OrderPositionChangeForm(forms.Form):
     )
     price = forms.DecimalField(
         required=False,
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         localize=True,
         label=_('New price (gross)')
+    )
+    blocked = forms.BooleanField(
+        required=False,
+        label=_('Ticket is blocked')
+    )
+    valid_from = SplitDateTimeField(
+        required=False,
+        widget=SplitDateTimePickerWidget,
+        label=_('Validity start')
+    )
+    valid_until = SplitDateTimeField(
+        required=False,
+        widget=SplitDateTimePickerWidget,
+        label=_('Validity end')
     )
     used_membership = forms.ChoiceField(
         required=False,
@@ -466,6 +493,9 @@ class OrderPositionChangeForm(forms.Form):
         initial = kwargs.get('initial', {})
 
         initial['price'] = instance.price
+        initial['blocked'] = instance.blocked and "admin" in instance.blocked
+        initial['valid_from'] = instance.valid_from
+        initial['valid_until'] = instance.valid_until
 
         kwargs['initial'] = initial
         super().__init__(*args, **kwargs)
@@ -536,7 +566,7 @@ class OrderPositionChangeForm(forms.Form):
 class OrderFeeChangeForm(forms.Form):
     value = forms.DecimalField(
         required=False,
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         localize=True,
         label=_('New price (gross)')
     )
@@ -701,7 +731,7 @@ class OrderRefundForm(forms.Form):
         )
     )
     partial_amount = forms.DecimalField(
-        required=False, max_digits=10, decimal_places=2,
+        required=False, max_digits=13, decimal_places=2,
         localize=True
     )
 
@@ -756,7 +786,8 @@ class EventCancelForm(forms.Form):
         label=_('Automatically refund money if possible'),
         initial=True,
         required=False,
-        help_text=_('Only available for payment method that support automatic refunds.')
+        help_text=_('Only available for payment method that support automatic refunds. Tickets that have been blocked '
+                    '(manually or by a plugin) are not auto-canceled and you will need to deal with them manually.')
     )
     manual_refund = forms.BooleanField(
         label=_('Create refund in the manual refund to-do list'),
@@ -789,18 +820,18 @@ class EventCancelForm(forms.Form):
     )
     keep_fee_fixed = forms.DecimalField(
         label=_("Keep a fixed cancellation fee"),
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         required=False
     )
     keep_fee_per_ticket = forms.DecimalField(
         label=_("Keep a fixed cancellation fee per ticket"),
         help_text=_("Free tickets and add-on products are not counted"),
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         required=False
     )
     keep_fee_percentage = forms.DecimalField(
         label=_("Keep a percentual cancellation fee"),
-        max_digits=10, decimal_places=2,
+        max_digits=13, decimal_places=2,
         required=False
     )
     keep_fees = forms.MultipleChoiceField(

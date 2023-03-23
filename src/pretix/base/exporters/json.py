@@ -36,15 +36,22 @@ import json
 from decimal import Decimal
 
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db.models import Prefetch
 from django.dispatch import receiver
+from django.utils.functional import lazy
+from django.utils.translation import gettext, gettext_lazy, pgettext_lazy
 
 from ..exporter import BaseExporter
+from ..models import ItemMetaValue, ItemVariation, ItemVariationMetaValue
 from ..signals import register_data_exporters
 
 
 class JSONExporter(BaseExporter):
     identifier = 'json'
-    verbose_name = 'Order data (JSON)'
+    verbose_name = lazy(lambda *args: gettext('Order data') + ' (JSON)', str)()
+    category = pgettext_lazy('export_category', 'Order data')
+    description = gettext_lazy('Download a structured JSON representation of all orders. This might be useful for the '
+                               'import in third-party systems.')
 
     def render(self, form_data):
         jo = {
@@ -76,6 +83,7 @@ class JSONExporter(BaseExporter):
                         'tax_rate': item.tax_rule.rate if item.tax_rule else Decimal('0.00'),
                         'tax_name': str(item.tax_rule.name) if item.tax_rule else None,
                         'admission': item.admission,
+                        'personalized': item.personalized,
                         'active': item.active,
                         'sales_channels': item.sales_channels,
                         'description': str(item.description),
@@ -101,14 +109,33 @@ class JSONExporter(BaseExporter):
                                 'name': str(variation),
                                 'description': str(variation.description),
                                 'position': variation.position,
+                                'checkin_attention': variation.checkin_attention,
+                                'require_approval': variation.require_approval,
                                 'require_membership': variation.require_membership,
                                 'sales_channels': variation.sales_channels,
                                 'available_from': variation.available_from,
                                 'available_until': variation.available_until,
                                 'hide_without_voucher': variation.hide_without_voucher,
+                                'meta_data': variation.meta_data,
                             } for variation in item.variations.all()
                         ]
-                    } for item in self.event.items.select_related('tax_rule').prefetch_related('variations')
+                    } for item in self.event.items.select_related('tax_rule').prefetch_related(
+                        Prefetch(
+                            'meta_values',
+                            ItemMetaValue.objects.select_related('property'),
+                            to_attr='meta_values_cached'
+                        ),
+                        Prefetch(
+                            'variations',
+                            queryset=ItemVariation.objects.prefetch_related(
+                                Prefetch(
+                                    'meta_values',
+                                    ItemVariationMetaValue.objects.select_related('property'),
+                                    to_attr='meta_values_cached'
+                                ),
+                            ),
+                        ),
+                    )
                 ],
                 'questions': [
                     {
@@ -168,6 +195,9 @@ class JSONExporter(BaseExporter):
                                 'state': position.state,
                                 'secret': position.secret,
                                 'addon_to': position.addon_to_id,
+                                'valid_from': position.valid_from,
+                                'valid_until': position.valid_until,
+                                'blocked': position.blocked,
                                 'answers': [
                                     {
                                         'question': answer.question_id,

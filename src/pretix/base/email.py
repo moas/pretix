@@ -35,15 +35,14 @@ from django.dispatch import receiver
 from django.template.loader import get_template
 from django.utils.formats import date_format
 from django.utils.timezone import now
-from django.utils.translation import (
-    get_language, gettext_lazy as _, pgettext_lazy,
-)
+from django.utils.translation import get_language, gettext_lazy as _
 
 from pretix.base.i18n import (
     LazyCurrencyNumber, LazyDate, LazyExpiresDate, LazyNumber,
 )
 from pretix.base.models import Event
-from pretix.base.settings import PERSON_NAME_SCHEMES
+from pretix.base.reldate import RelativeDateWrapper
+from pretix.base.settings import PERSON_NAME_SCHEMES, get_name_parts_localized
 from pretix.base.signals import (
     register_html_mail_renderers, register_mail_placeholders,
 )
@@ -299,7 +298,8 @@ def get_email_context(**kwargs):
         kwargs.setdefault("position_or_address", kwargs['position'])
     if 'order' in kwargs:
         try:
-            kwargs['invoice_address'] = kwargs['order'].invoice_address
+            if not kwargs.get('invoice_address'):
+                kwargs['invoice_address'] = kwargs['order'].invoice_address
         except InvoiceAddress.DoesNotExist:
             kwargs['invoice_address'] = InvoiceAddress(order=kwargs['order'])
         finally:
@@ -318,13 +318,18 @@ def get_email_context(**kwargs):
     return ctx
 
 
-def _placeholder_payment(order, payment):
-    if not payment:
-        return None
-    if 'payment' in inspect.signature(payment.payment_provider.order_pending_mail_render).parameters:
-        return str(payment.payment_provider.order_pending_mail_render(order, payment))
+def _placeholder_payments(order, payments):
+    d = []
+    for payment in payments:
+        if 'payment' in inspect.signature(payment.payment_provider.order_pending_mail_render).parameters:
+            d.append(str(payment.payment_provider.order_pending_mail_render(order, payment)))
+        else:
+            d.append(str(payment.payment_provider.order_pending_mail_render(order)))
+    d = [line for line in d if line.strip()]
+    if d:
+        return '\n\n'.join(d)
     else:
-        return str(payment.payment_provider.order_pending_mail_render(order))
+        return ''
 
 
 def get_best_name(position_or_address, parts=False):
@@ -375,9 +380,22 @@ def base_placeholders(sender, **kwargs):
             'currency', ['event'], lambda event: event.currency, lambda event: event.currency
         ),
         SimpleFunctionalMailTextPlaceholder(
+            'order_email', ['order'], lambda order: order.email, 'john@example.org'
+        ),
+        SimpleFunctionalMailTextPlaceholder(
+            'invoice_number', ['invoice'],
+            lambda invoice: invoice.full_invoice_no,
+            f'{sender.settings.invoice_numbers_prefix or (sender.slug.upper() + "-")}00000'
+        ),
+        SimpleFunctionalMailTextPlaceholder(
             'refund_amount', ['event_or_subevent', 'refund_amount'],
             lambda event_or_subevent, refund_amount: LazyCurrencyNumber(refund_amount, event_or_subevent.currency),
             lambda event_or_subevent: LazyCurrencyNumber(Decimal('42.23'), event_or_subevent.currency)
+        ),
+        SimpleFunctionalMailTextPlaceholder(
+            'pending_sum', ['event', 'pending_sum'],
+            lambda event, pending_sum: LazyCurrencyNumber(pending_sum, event.currency),
+            lambda event: LazyCurrencyNumber(Decimal('42.23'), event.currency)
         ),
         SimpleFunctionalMailTextPlaceholder(
             'total_with_currency', ['event', 'order'], lambda event, order: LazyCurrencyNumber(order.total,
@@ -470,13 +488,29 @@ def base_placeholders(sender, **kwargs):
             ),
         ),
         SimpleFunctionalMailTextPlaceholder(
+            'order_modification_deadline_date_and_time', ['order', 'event'],
+            lambda order, event:
+            date_format(order.modify_deadline.astimezone(event.timezone), 'SHORT_DATETIME_FORMAT')
+            if order.modify_deadline
+            else '',
+            lambda event: date_format(
+                event.settings.get(
+                    'last_order_modification_date', as_type=RelativeDateWrapper
+                ).datetime(event).astimezone(event.timezone),
+                'SHORT_DATETIME_FORMAT'
+            ) if event.settings.get('last_order_modification_date') else '',
+        ),
+        SimpleFunctionalMailTextPlaceholder(
             'event_location', ['event_or_subevent'], lambda event_or_subevent: str(event_or_subevent.location or ''),
             lambda event: str(event.location or ''),
         ),
         SimpleFunctionalMailTextPlaceholder(
             'event_admission_time', ['event_or_subevent'],
-            lambda event_or_subevent: date_format(event_or_subevent.date_admission, 'TIME_FORMAT') if event_or_subevent.date_admission else '',
-            lambda event: date_format(event.date_admission, 'TIME_FORMAT') if event.date_admission else '',
+            lambda event_or_subevent:
+                date_format(event_or_subevent.date_admission.astimezone(event_or_subevent.timezone), 'TIME_FORMAT')
+                if event_or_subevent.date_admission
+                else '',
+            lambda event: date_format(event.date_admission.astimezone(event.timezone), 'TIME_FORMAT') if event.date_admission else '',
         ),
         SimpleFunctionalMailTextPlaceholder(
             'subevent', ['waiting_list_entry', 'event'],
@@ -489,20 +523,20 @@ def base_placeholders(sender, **kwargs):
             lambda event: (event if not event.has_subevents or not event.subevents.exists() else event.subevents.first()).get_date_from_display()
         ),
         SimpleFunctionalMailTextPlaceholder(
-            'url_remove', ['waiting_list_entry', 'event'],
-            lambda waiting_list_entry, event: build_absolute_uri(
+            'url_remove', ['waiting_list_voucher', 'event'],
+            lambda waiting_list_voucher, event: build_absolute_uri(
                 event, 'presale:event.waitinglist.remove'
-            ) + '?voucher=' + waiting_list_entry.voucher.code,
+            ) + '?voucher=' + waiting_list_voucher.code,
             lambda event: build_absolute_uri(
                 event,
                 'presale:event.waitinglist.remove',
             ) + '?voucher=68CYU2H6ZTP3WLK5',
         ),
         SimpleFunctionalMailTextPlaceholder(
-            'url', ['waiting_list_entry', 'event'],
-            lambda waiting_list_entry, event: build_absolute_uri(
+            'url', ['waiting_list_voucher', 'event'],
+            lambda waiting_list_voucher, event: build_absolute_uri(
                 event, 'presale:event.redeem'
-            ) + '?voucher=' + waiting_list_entry.voucher.code,
+            ) + '?voucher=' + waiting_list_voucher.code,
             lambda event: build_absolute_uri(
                 event,
                 'presale:event.redeem',
@@ -557,7 +591,7 @@ def base_placeholders(sender, **kwargs):
             _('Sample Admission Ticket')
         ),
         SimpleFunctionalMailTextPlaceholder(
-            'code', ['waiting_list_entry'], lambda waiting_list_entry: waiting_list_entry.voucher.code,
+            'code', ['waiting_list_voucher'], lambda waiting_list_voucher: waiting_list_voucher.code,
             '68CYU2H6ZTP3WLK5'
         ),
         SimpleFunctionalMailTextPlaceholder(
@@ -599,7 +633,7 @@ def base_placeholders(sender, **kwargs):
             _('An individual text with a reason can be inserted here.'),
         ),
         SimpleFunctionalMailTextPlaceholder(
-            'payment_info', ['order', 'payment'], _placeholder_payment,
+            'payment_info', ['order', 'payments'], _placeholder_payments,
             _('The amount has been charged to your card.'),
         ),
         SimpleFunctionalMailTextPlaceholder(
@@ -609,6 +643,10 @@ def base_placeholders(sender, **kwargs):
         SimpleFunctionalMailTextPlaceholder(
             'attendee_name', ['position'], lambda position: position.attendee_name,
             _('John Doe'),
+        ),
+        SimpleFunctionalMailTextPlaceholder(
+            'positionid', ['position'], lambda position: str(position.positionid),
+            '1'
         ),
         SimpleFunctionalMailTextPlaceholder(
             'name', ['position_or_address'],
@@ -653,10 +691,3 @@ def base_placeholders(sender, **kwargs):
         ))
 
     return ph
-
-
-def get_name_parts_localized(name_parts, key):
-    value = name_parts.get(key, "")
-    if key == "salutation":
-        return pgettext_lazy("person_name_salutation", value)
-    return value

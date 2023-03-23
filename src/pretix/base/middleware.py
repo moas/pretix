@@ -30,7 +30,6 @@ from django.urls import get_script_prefix
 from django.utils import timezone, translation
 from django.utils.cache import patch_vary_headers
 from django.utils.deprecation import MiddlewareMixin
-from django.utils.translation import LANGUAGE_SESSION_KEY
 from django.utils.translation.trans_real import (
     check_for_language, get_supported_language_variant, language_code_re,
     parse_accept_lang_header,
@@ -128,12 +127,7 @@ def get_language_from_user_settings(request: HttpRequest) -> str:
             return lang_code
 
 
-def get_language_from_session_or_cookie(request: HttpRequest) -> str:
-    if hasattr(request, 'session'):
-        lang_code = request.session.get(LANGUAGE_SESSION_KEY)
-        if lang_code in _supported and lang_code is not None and check_for_language(lang_code):
-            return lang_code
-
+def get_language_from_cookie(request: HttpRequest) -> str:
     lang_code = request.COOKIES.get(settings.LANGUAGE_COOKIE_NAME)
     try:
         return get_supported_language_variant(lang_code)
@@ -187,14 +181,14 @@ def get_language_from_request(request: HttpRequest) -> str:
         return (
             get_language_from_user_settings(request)
             or get_language_from_customer_settings(request)
-            or get_language_from_session_or_cookie(request)
+            or get_language_from_cookie(request)
             or get_language_from_browser(request)
             or get_language_from_event(request)
             or get_default_language()
         )
     else:
         return (
-            get_language_from_session_or_cookie(request)
+            get_language_from_cookie(request)
             or get_language_from_customer_settings(request)
             or get_language_from_user_settings(request)
             or get_language_from_browser(request)
@@ -223,6 +217,11 @@ def _merge_csp(a, b):
     for k, v in b.items():
         if k not in a:
             a[k] = b[k]
+
+    for k, v in a.items():
+        if "'unsafe-inline'" in v:
+            # If we need unsafe-inline, drop any hashes or nonce as they will be ignored otherwise
+            a[k] = [i for i in v if not i.startswith("'nonce-") and not i.startswith("'sha-")]
 
 
 class SecurityMiddleware(MiddlewareMixin):
@@ -301,7 +300,7 @@ class SecurityMiddleware(MiddlewareMixin):
             resp['Content-Security-Policy'] = _render_csp(h).format(static=staticdomain, dynamic=dynamicdomain,
                                                                     media=mediadomain)
             for k, v in h.items():
-                h[k] = ' '.join(v).format(static=staticdomain, dynamic=dynamicdomain, media=mediadomain).split(' ')
+                h[k] = sorted(set(' '.join(v).format(static=staticdomain, dynamic=dynamicdomain, media=mediadomain).split(' ')))
             resp['Content-Security-Policy'] = _render_csp(h)
         elif 'Content-Security-Policy' in resp:
             del resp['Content-Security-Policy']

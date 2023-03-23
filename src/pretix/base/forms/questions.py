@@ -35,6 +35,7 @@
 import copy
 import json
 import logging
+from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
 
@@ -51,10 +52,11 @@ from django.core.validators import (
 )
 from django.db.models import QuerySet
 from django.forms import Select, widgets
+from django.forms.widgets import FILE_INPUT_CONTRADICTION
 from django.utils.formats import date_format
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
-from django.utils.timezone import get_current_timezone
+from django.utils.timezone import get_current_timezone, now
 from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django_countries import countries
 from django_countries.fields import Country, CountryField
@@ -72,7 +74,7 @@ from pretix.base.forms.widgets import (
 from pretix.base.i18n import (
     get_babel_locale, get_language_without_region, language,
 )
-from pretix.base.models import InvoiceAddress, Question, QuestionOption
+from pretix.base.models import InvoiceAddress, Item, Question, QuestionOption
 from pretix.base.models.tax import VAT_ID_COUNTRIES, ask_for_vat_id
 from pretix.base.services.tax import (
     VATIDFinalError, VATIDTemporaryError, validate_vat_id,
@@ -134,6 +136,10 @@ class NamePartsWidget(forms.MultiWidget):
             data.append(value.get(fname, ""))
         if '_legacy' in value and not data[-1]:
             data[-1] = value.get('_legacy', '')
+        elif not any(d for d in data) and '_scheme' in value:
+            scheme = PERSON_NAME_SCHEMES[value['_scheme']]
+            data[-1] = scheme['concatenation'](value).strip()
+
         return data
 
     def render(self, name: str, value, attrs=None, renderer=None) -> str:
@@ -253,7 +259,7 @@ class NamePartsFormField(forms.MultiValueField):
         if self.require_all_fields and not all(v for v in value):
             raise forms.ValidationError(self.error_messages['incomplete'], code='required')
 
-        if sum(len(v) for v in value if v) > 250:
+        if sum(len(v) for v in value.values() if v) > 250:
             raise forms.ValidationError(_('Please enter a shorter name.'), code='max_length')
 
         return value
@@ -429,7 +435,7 @@ class PortraitImageWidget(UploadedFileWidget):
 
     def value_from_datadict(self, data, files, name):
         d = super().value_from_datadict(data, files, name)
-        if d is not None:
+        if d is not None and d is not False and d is not FILE_INPUT_CONTRADICTION:
             d._cropdata = json.loads(data.get(name + '_cropdata', '{}') or '{}')
         return d
 
@@ -526,7 +532,7 @@ class PortraitImageField(SizeValidationMixin, ExtValidationMixin, forms.FileFiel
                     code='aspect_ratio_not_3_by_4',
                 )
         except Exception as exc:
-            logger.exception('foo')
+            logger.exception('Could not parse image')
             # Pillow doesn't recognize it as an image.
             if isinstance(exc, ValidationError):
                 raise
@@ -568,9 +574,37 @@ class BaseQuestionsForm(forms.Form):
 
         super().__init__(*args, **kwargs)
 
+        if cartpos and item.validity_mode == Item.VALIDITY_MODE_DYNAMIC and item.validity_dynamic_start_choice:
+            if item.validity_dynamic_start_choice_day_limit:
+                max_date = now().astimezone(event.timezone) + timedelta(days=item.validity_dynamic_start_choice_day_limit)
+            else:
+                max_date = None
+            if item.validity_dynamic_duration_months or item.validity_dynamic_duration_days:
+                attrs = {}
+                if max_date:
+                    attrs['data-max'] = max_date.date().isoformat()
+                self.fields['requested_valid_from'] = forms.DateField(
+                    label=_('Start date'),
+                    help_text=_('If you keep this empty, the ticket will be valid starting at the time of purchase.'),
+                    required=False,
+                    widget=DatePickerWidget(attrs),
+                    validators=[MaxDateValidator(max_date.date())] if max_date else []
+                )
+            else:
+                self.fields['requested_valid_from'] = forms.SplitDateTimeField(
+                    label=_('Start date'),
+                    help_text=_('If you keep this empty, the ticket will be valid starting at the time of purchase.'),
+                    required=False,
+                    widget=SplitDateTimePickerWidget(
+                        time_format=get_format_without_seconds('TIME_INPUT_FORMATS'),
+                        max_date=max_date
+                    ),
+                    validators=[MaxDateTimeValidator(max_date)] if max_date else []
+                )
+
         add_fields = {}
 
-        if item.admission and event.settings.attendee_names_asked:
+        if item.ask_attendee_data and event.settings.attendee_names_asked:
             add_fields['attendee_name_parts'] = NamePartsFormField(
                 max_length=255,
                 required=event.settings.attendee_names_required and not self.all_optional,
@@ -579,7 +613,7 @@ class BaseQuestionsForm(forms.Form):
                 label=_('Attendee name'),
                 initial=(cartpos.attendee_name_parts if cartpos else orderpos.attendee_name_parts),
             )
-        if item.admission and event.settings.attendee_emails_asked:
+        if item.ask_attendee_data and event.settings.attendee_emails_asked:
             add_fields['attendee_email'] = forms.EmailField(
                 required=event.settings.attendee_emails_required and not self.all_optional,
                 label=_('Attendee email'),
@@ -590,7 +624,7 @@ class BaseQuestionsForm(forms.Form):
                     }
                 )
             )
-        if item.admission and event.settings.attendee_company_asked:
+        if item.ask_attendee_data and event.settings.attendee_company_asked:
             add_fields['company'] = forms.CharField(
                 required=event.settings.attendee_company_required and not self.all_optional,
                 label=_('Company'),
@@ -598,7 +632,7 @@ class BaseQuestionsForm(forms.Form):
                 initial=(cartpos.company if cartpos else orderpos.company),
             )
 
-        if item.admission and event.settings.attendee_addresses_asked:
+        if item.ask_attendee_data and event.settings.attendee_addresses_asked:
             add_fields['street'] = forms.CharField(
                 required=event.settings.attendee_addresses_required and not self.all_optional,
                 label=_('Address'),
@@ -685,7 +719,7 @@ class BaseQuestionsForm(forms.Form):
             label = escape(q.question)  # django-bootstrap3 calls mark_safe
             required = q.required and not self.all_optional
             if q.type == Question.TYPE_BOOLEAN:
-                if q.required:
+                if required:
                     # For some reason, django-bootstrap3 does not set the required attribute
                     # itself.
                     widget = forms.CheckboxInput(attrs={'required': 'required'})
@@ -914,6 +948,7 @@ class BaseQuestionsForm(forms.Form):
 
 class BaseInvoiceAddressForm(forms.ModelForm):
     vat_warning = False
+    address_validation = False
 
     class Meta:
         model = InvoiceAddress
@@ -1049,6 +1084,9 @@ class BaseInvoiceAddressForm(forms.ModelForm):
                 v.widget.attrs['autocomplete'] = 'section-invoice billing ' + v.widget.attrs.get('autocomplete', '')
 
     def clean(self):
+        from pretix.base.addressvalidation import \
+            validate_address  # local import to prevent impact on startup time
+
         data = self.cleaned_data
         if not data.get('is_business'):
             data['company'] = ''
@@ -1064,9 +1102,8 @@ class BaseInvoiceAddressForm(forms.ModelForm):
         if 'vat_id' in self.changed_data or not data.get('vat_id'):
             self.instance.vat_id_validated = False
 
-        if data.get('city') and data.get('country') and str(data['country']) in COUNTRIES_WITH_STATE_IN_ADDRESS:
-            if not data.get('state'):
-                self.add_error('state', _('This field is required.'))
+        if self.address_validation:
+            self.cleaned_data = data = validate_address(data, self.all_optional)
 
         self.instance.name_parts = data.get('name_parts')
 

@@ -28,14 +28,16 @@ from celery import states
 from celery.result import AsyncResult
 from django.conf import settings
 from django.contrib import messages
-from django.core.exceptions import ValidationError
-from django.http import JsonResponse, QueryDict
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.http import HttpResponse, JsonResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.test import RequestFactory
 from django.utils import timezone, translation
 from django.utils.timezone import get_current_timezone
 from django.utils.translation import get_language, gettext as _
+from django.views import View
 from django.views.generic import FormView
+from redis import ResponseError
 
 from pretix.base.models import User
 from pretix.base.services.tasks import ProfiledEventTask
@@ -68,6 +70,11 @@ class AsyncMixin:
                 res.get(timeout=timeout, propagate=False)
             except celery.exceptions.TimeoutError:
                 pass
+            except ResponseError:
+                # There is a long-standing concurrency issue in either celery or redis-py that hasn't been fixed
+                # yet. Instead of crashing, we can ignore it and the client will retry their request and hopefully
+                # it is fixed next time.
+                logger.warning('Ignored ResponseError in AsyncResult.get()')
             except ConnectionError:
                 # Redis probably just restarted, let's just report not ready and retry next time
                 data = self._ajax_response_data()
@@ -142,6 +149,8 @@ class AsyncMixin:
         return redirect(self.get_success_url(value))
 
     def error(self, exception):
+        if isinstance(exception, PermissionDenied):
+            raise exception
         messages.error(self.request, self.get_error_message(exception))
         if "ajax" in self.request.POST or "ajax" in self.request.GET:
             return JsonResponse({
@@ -208,8 +217,16 @@ class AsyncFormView(AsyncMixin, FormView):
     expected_exceptions = (ValidationError,)
     task_base = ProfiledEventTask
 
+    def async_set_progress(self, percentage):
+        if not self._task_self.request.called_directly:
+            self._task_self.update_state(
+                state='PROGRESS',
+                meta={'value': percentage}
+            )
+
     def __init_subclass__(cls):
-        def async_execute(self, *, request_path, query_string, form_kwargs, locale, tz, organizer=None, event=None, user=None, session_key=None):
+        def async_execute(self, *, request_path, query_string, form_kwargs, locale, tz, url_kwargs=None, url_args=None,
+                          organizer=None, event=None, user=None, session_key=None):
             view_instance = cls()
             form_kwargs['data'] = QueryDict(form_kwargs['data'])
             req = RequestFactory().post(
@@ -218,6 +235,8 @@ class AsyncFormView(AsyncMixin, FormView):
                 content_type='application/x-www-form-urlencoded'
             )
             view_instance.request = req
+            view_instance.kwargs = url_kwargs
+            view_instance.args = url_args
             if event:
                 view_instance.request.event = event
                 view_instance.request.organizer = event.organizer
@@ -229,6 +248,9 @@ class AsyncFormView(AsyncMixin, FormView):
                 engine = import_module(settings.SESSION_ENGINE)
                 self.SessionStore = engine.SessionStore
                 view_instance.request.session = self.SessionStore(session_key)
+
+            task_self = self
+            view_instance._task_self = task_self
 
             with translation.override(locale), timezone.override(pytz.timezone(tz)):
                 form_class = view_instance.get_form_class()
@@ -277,7 +299,112 @@ class AsyncFormView(AsyncMixin, FormView):
             'request_path': self.request.path,
             'query_string': self.request.GET.urlencode(),
             'form_kwargs': form_kwargs,
+            'url_args': self.args,
+            'url_kwargs': self.kwargs,
             'locale': get_language(),
+            'tz': get_current_timezone().zone,
+        }
+        if hasattr(self.request, 'organizer'):
+            kwargs['organizer'] = self.request.organizer.pk
+        if self.request.user.is_authenticated:
+            kwargs['user'] = self.request.user.pk
+        if hasattr(self.request, 'event'):
+            kwargs['event'] = self.request.event.pk
+        if hasattr(self.request, 'session'):
+            kwargs['session_key'] = self.request.session.session_key
+
+        try:
+            res = type(self).async_execute.apply_async(kwargs=kwargs)
+        except ConnectionError:
+            # Task very likely not yet sent, due to redis restarting etc. Let's try once again
+            res = type(self).async_execute.apply_async(kwargs=kwargs)
+
+        if 'ajax' in self.request.GET or 'ajax' in self.request.POST:
+            data = self._return_ajax_result(res)
+            data['check_url'] = self.get_check_url(res.id, True)
+            return JsonResponse(data)
+        else:
+            if res.ready():
+                if res.successful() and not isinstance(res.info, Exception):
+                    return self.success(res.info)
+                else:
+                    return self.error(res.info)
+            return redirect(self.get_check_url(res.id, False))
+
+
+class AsyncPostView(AsyncMixin, View):
+    """
+    View variant in which instead of ``post``, an ``async_post`` is executed in a celery task.
+    Note that this places some severe limitations on the form and the view, e.g. ``async_post`` may not
+    depend on the request object unless specifically supported by this class. File upload is currently also
+    not supported.
+    """
+    known_errortypes = ['ValidationError', 'PermissionDenied']
+    expected_exceptions = (ValidationError, PermissionDenied)
+    task_base = ProfiledEventTask
+
+    def async_set_progress(self, percentage):
+        if not self._task_self.request.called_directly:
+            self._task_self.update_state(
+                state='PROGRESS',
+                meta={'value': percentage}
+            )
+
+    def __init_subclass__(cls):
+        def async_execute(self, *, request_path, url_args, url_kwargs, query_string, post_data, locale, tz,
+                          organizer=None, event=None, user=None, session_key=None):
+            view_instance = cls()
+            req = RequestFactory().post(
+                request_path + '?' + query_string,
+                data=post_data,
+                content_type='application/x-www-form-urlencoded'
+            )
+            view_instance.request = req
+            view_instance.kwargs = url_kwargs
+            view_instance.args = url_args
+            if event:
+                view_instance.request.event = event
+                view_instance.request.organizer = event.organizer
+            elif organizer:
+                view_instance.request.organizer = organizer
+            if user:
+                view_instance.request.user = User.objects.get(pk=user) if isinstance(user, int) else user
+            if session_key:
+                engine = import_module(settings.SESSION_ENGINE)
+                self.SessionStore = engine.SessionStore
+                view_instance.request.session = self.SessionStore(session_key)
+
+            task_self = self
+            view_instance._task_self = task_self
+
+            with translation.override(locale), timezone.override(pytz.timezone(tz)):
+                return view_instance.async_post(view_instance.request, *url_args, **url_kwargs)
+
+        cls.async_execute = app.task(
+            base=cls.task_base,
+            bind=True,
+            name=cls.__module__ + '.' + cls.__name__ + '.async_execute',
+            throws=cls.expected_exceptions
+        )(async_execute)
+
+    def async_post(self, request, *args, **kwargs):
+        pass
+
+    def get(self, request, *args, **kwargs):
+        if 'async_id' in request.GET and settings.HAS_CELERY:
+            return self.get_result(request)
+        return HttpResponse(status=405)
+
+    def post(self, request, *args, **kwargs):
+        if request.FILES:
+            raise TypeError('File upload currently not supported in AsyncPostView')
+        kwargs = {
+            'request_path': self.request.path,
+            'query_string': self.request.GET.urlencode(),
+            'post_data': self.request.POST.urlencode(),
+            'locale': get_language(),
+            'url_args': args,
+            'url_kwargs': kwargs,
             'tz': get_current_timezone().zone,
         }
         if hasattr(self.request, 'organizer'):

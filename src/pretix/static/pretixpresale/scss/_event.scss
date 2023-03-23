@@ -96,9 +96,9 @@
     }
 
     &.headline, &.simple {
-        border-top: 2px solid transparent;
+        border-top: 1px solid transparent;
         &::before {
-            border-top: 2px solid $table-border-color;
+            border-top: 1px solid $table-border-color;
         }
     }
 }
@@ -110,14 +110,14 @@ article.item-with-variations {
 
 article.item-with-variations:last-child, .product-row:last-child {
     position: relative;
-    border-bottom: 2px solid transparent;
+    border-bottom: 1px solid transparent;
     &::after {
         position: absolute;
         bottom: 0;
         left: 15px;
         width: calc(100% - 30px);
         content: '';
-        border-bottom: 2px solid $table-border-color;
+        border-bottom: 1px solid $table-border-color;
     }
 }
 article.item-with-variations .product-row:last-child:after {
@@ -140,12 +140,13 @@ article.item-with-variations .product-row:last-child:after {
     display: none;
 }
 
+.panel-body > *:last-child,
 .panel-body address:last-child {
     margin-bottom: 0;
 }
 
 .product-row {
-    padding: 10px 0;
+    padding: 1.25*$line-height-computed 0;
 
     .count form {
         display: inline;
@@ -161,6 +162,21 @@ article.item-with-variations .product-row:last-child:after {
 
     &.total {
         border-top: 1px solid $table-border-color;
+    }
+    &.variation>div:first-child {
+        position: relative;
+        padding-inline-start: calc(15px + 1.3em);
+    }
+    &.variation h5:before {
+        content: "";
+        display: block;
+        width: .65em;
+        height: 6px;
+        position: absolute;
+        left: 16px;
+        top: 0.35em;
+        border-width: 0 0 1px 1px;
+        border-style: solid;
     }
 }
 .panel-contact dl {
@@ -197,6 +213,25 @@ div.front-page {
     }
     .row-voucher > div:first-child {
         margin-bottom: 15px;
+    }
+}
+@media (min-width: $screen-sm-min) {
+    .col-xs-6.availability-box,
+    .col-xs-6.price:has(.input-group-price) {
+        margin-top: -6px;
+        margin-bottom: -6px;
+    }
+}
+
+@media (max-width: $screen-xs-max) {
+    .product-description p:last-child {
+        margin-bottom: 15px;
+    }
+    .product-row .price {
+        text-align: left;
+    }
+    .product-row.variation .price {
+        padding-inline-start: calc(1.3em + 15px);
     }
 }
 

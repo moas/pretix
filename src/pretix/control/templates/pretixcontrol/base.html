@@ -40,6 +40,7 @@
             <script type="text/javascript" src="{% static "pretixcontrol/js/sb-admin-2.js" %}"></script>
 		    <script type="text/javascript" src="{% static "pretixcontrol/js/ui/main.js" %}"></script>
             <script type="text/javascript" src="{% static "pretixcontrol/js/ui/quota.js" %}"></script>
+            <script type="text/javascript" src="{% static "pretixcontrol/js/ui/rrule.js" %}"></script>
             <script type="text/javascript" src="{% static "pretixcontrol/js/ui/subevent.js" %}"></script>
             <script type="text/javascript" src="{% static "pretixcontrol/js/ui/question.js" %}"></script>
             <script type="text/javascript" src="{% static "pretixcontrol/js/ui/variations.js" %}"></script>
@@ -122,7 +123,7 @@
                         </a>
                     {% endif %}
                     <a class="navbar-brand" href="{% url "control:index" %}">
-                        <img src="{% static "pretixbase/img/pretix-icon.svg" %}" />
+                        <img src="{% static "pretixbase/img/pretix-icon-white-mini.svg" %}" />
                         {{ settings.PRETIX_INSTANCE_NAME }}
                     </a>
                 </div>
@@ -419,6 +420,17 @@
                                     line with pretix' license.
                                 {% endblocktrans %}
                             </a>
+                        </div>
+                    {% endif %}
+
+                    {% if "mysql" in settings.DATABASES.default.ENGINE and not request.organizer %}
+                        <div class="alert alert-warning">
+                            {% blocktrans trimmed %}
+                                You are using MySQL or MariaDB as your database backend for pretix.
+                                Starting in pretix 5.0, these will no longer be supported and you will need to migrate to PostgreSQL.
+                                Please see the pretix administrator documentation for a migration guide, and the pretix 4.16
+                                release notes for more information.
+                            {% endblocktrans %}
                         </div>
                     {% endif %}
 

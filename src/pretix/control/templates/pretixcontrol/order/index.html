@@ -1,6 +1,7 @@
 {% extends "pretixcontrol/event/base.html" %}
 {% load i18n %}
 {% load bootstrap3 %}
+{% load daterange %}
 {% load eventurl %}
 {% load money %}
 {% load rich_text %}
@@ -184,13 +185,24 @@
                         <dt>{% trans "Order locale" %}</dt>
                         <dd>
                             {{ display_locale }}
-                            <a href="{% url "control:event.order.locale" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
-                                <span class="fa fa-edit"></span>
-                            </a>
+                            {% if "can_change_orders" in request.eventpermset %}
+                                <a href="{% url "control:event.order.locale" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
+                                    <span class="fa fa-edit"></span>
+                                </a>
+                            {% endif %}
                         </dd>
                         {% if order.status == "n" %}
                             <dt>{% trans "Expiry date" %}</dt>
-                            <dd>{{ order.expires|date:"SHORT_DATETIME_FORMAT" }}</dd>
+                            <dd>
+                                {{ order.expires|date:"SHORT_DATETIME_FORMAT" }}
+                                {% if order.valid_if_pending %}
+                                    <span class="fa fa-warning text-danger" data-toggle="tooltip"
+                                          title="{% trans "This order will not expire automatically since it is already confirmed and can be used." %}"></span>
+                                {% elif has_cancellation_fee and request.event.settings.payment_term_expire_automatically %}
+                                    <span class="fa fa-warning text-danger" data-toggle="tooltip"
+                                          title="{% trans "This order will not expire automatically as it has an open cancellation fee." %}"></span>
+                                {% endif %}
+                            </dd>
                         {% endif %}
                         {% if request.organizer.settings.customer_accounts %}
                             <dt>{% trans "Customer account" %}</dt>
@@ -200,9 +212,11 @@
                                         {{ order.customer.identifier }} – {{ order.customer.email }}
                                     </a>
                                 {% endif %}
-                                <a href="{% url "control:event.order.contact" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
-                                    <span class="fa fa-edit"></span>
-                                </a>
+                                {% if "can_change_orders" in request.eventpermset %}
+                                    <a href="{% url "control:event.order.contact" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
+                                        <span class="fa fa-edit"></span>
+                                    </a>
+                                {% endif %}
                             </dd>
                         {% endif %}
                         <dt>{% trans "Contact email" %}</dt>
@@ -211,21 +225,23 @@
                             {% if order.email and order.email_known_to_work %}
                                 <span class="fa fa-check-circle text-success" data-toggle="tooltip" title="{% trans "We know that this email address works because the user clicked a link we sent them." %}"></span>
                             {% endif %}
-                            <a href="{% url "control:event.order.contact" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
-                                <span class="fa fa-edit"></span>
-                            </a>
-                            {% if order.email %}
-                                <a href="{% url "control:event.order.sendmail" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
-                                    <span class="fa fa-envelope-o"></span>
+                            {% if "can_change_orders" in request.eventpermset %}
+                                <a href="{% url "control:event.order.contact" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
+                                    <span class="fa fa-edit"></span>
                                 </a>
-                                {% if order.status != "c" %}
-                                    <form class="form-inline helper-display-inline" method="post"
-                                          action="{% url "control:event.order.resendlink" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
-                                        {% csrf_token %}
-                                        <button class="btn btn-default btn-xs">
-                                            {% trans "Resend link" %}
-                                        </button>
-                                    </form>
+                                {% if order.email %}
+                                    <a href="{% url "control:event.order.sendmail" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
+                                        <span class="fa fa-envelope-o"></span>
+                                    </a>
+                                    {% if order.status != "c" %}
+                                        <form class="form-inline helper-display-inline" method="post"
+                                              action="{% url "control:event.order.resendlink" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
+                                            {% csrf_token %}
+                                            <button class="btn btn-default btn-xs">
+                                                {% trans "Resend link" %}
+                                            </button>
+                                        </form>
+                                    {% endif %}
                                 {% endif %}
                             {% endif %}
                         </dd>
@@ -233,16 +249,18 @@
                             <dt>{% trans "Phone number" %}</dt>
                             <dd>
                                 {{ order.phone|default_if_none:""|phone_format }}
-                                <a href="{% url "control:event.order.contact" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
-                                    <span class="fa fa-edit"></span>
-                                </a>
+                                {% if "can_change_orders" in request.eventpermset %}
+                                    <a href="{% url "control:event.order.contact" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
+                                        <span class="fa fa-edit"></span>
+                                    </a>
+                                {% endif %}
                             </dd>
                         {% endif %}
                         {% if invoices %}
                             <dt>{% trans "Invoices" %}</dt>
                             <dd>
                                 {% for i in invoices %}
-                                    <a href="{% url "control:event.invoice.download" invoice=i.pk event=request.event.slug organizer=request.event.organizer.slug %}">
+                                    <a href="{% url "control:event.invoice.download" invoice=i.pk event=request.event.slug organizer=request.event.organizer.slug %}" target="_blank">
                                         {% if i.is_cancellation %}{% trans "Cancellation" context "invoice" %}{% else %}{% trans "Invoice" %}{% endif %}
                                         {{ i.number }}</a>
                                     ({{ i.date|date:"SHORT_DATE_FORMAT" }})
@@ -300,7 +318,7 @@
                                         {% trans "Email invoices" %}
                                     </a>
                                 {% endif %}
-                                {% if can_generate_invoice %}
+                                {% if can_generate_invoice and 'can_change_orders' in request.eventpermset %}
                                     <br/>
                                     <form class="form-inline helper-display-inline" method="post"
                                             action="{% url "control:event.order.geninvoice" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
@@ -311,7 +329,7 @@
                                     </form>
                                 {% endif %}
                             </dd>
-                        {% elif can_generate_invoice %}
+                        {% elif can_generate_invoice and 'can_change_orders' in request.eventpermset %}
                             <dt>{% trans "Invoices" %}</dt>
                             <dd>
                                 <form class="form-inline helper-display-inline" method="post"
@@ -329,11 +347,11 @@
             <div class="panel panel-default items">
                 <div class="panel-heading">
                     <div class="pull-right flip">
-                        <a href="{% url "control:event.order.info" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
-                            <span class="fa fa-edit"></span>
-                            {% trans "Change answers" %}
-                        </a>
                         {% if 'can_change_orders' in request.eventpermset %}
+                            <a href="{% url "control:event.order.info" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
+                                <span class="fa fa-edit"></span>
+                                {% trans "Change answers" %}
+                            </a>
                             &middot; <a href="{% url "control:event.order.change" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
                                 <span class="fa fa-edit"></span>
                                 {% trans "Change products" %}
@@ -376,6 +394,15 @@
                                         {% endif %}
                                     {% endfor %}
                                 {% endif %}
+                                {% if line.blocked %}
+                                    <br />
+                                    <strong class="text-danger">
+                                        <span class="fa fa-ban fa-fw text-danger"></span>
+                                        {% for k, block_reason in line.blocked_reasons.items %}
+                                            {{ block_reason }}
+                                        {% endfor %}
+                                    </strong>
+                                {% endif %}
                                 {% if line.seat %}
                                     <br />
                                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="14" viewBox="0 0 4.7624999 3.7041668" class="svg-icon">
@@ -414,6 +441,26 @@
                                             {{ line.discount.internal_name }}
                                         </a>
                                     </span>
+                                {% endif %}
+                                {% if line.valid_from or line.valid_until %}
+                                    <div class="cart-icon-details">
+                                        <dd>
+                                            <span class="fa fa-clock-o fa-fw" aria-hidden="true"></span>
+                                            {% if line.valid_from and line.valid_until %}
+                                                {% blocktrans trimmed with datetime_range=line.valid_from|datetimerange:line.valid_until %}
+                                                    Valid {{ datetime_range }}
+                                                {% endblocktrans %}
+                                            {% elif line.valid_from %}
+                                                {% blocktrans trimmed with datetime=line.valid_from|date:"SHORT_DATETIME_FORMAT" %}
+                                                    Valid from {{ datetime }}
+                                                {% endblocktrans %}
+                                            {% elif line.valid_until %}
+                                                {% blocktrans trimmed with datetime=line.valid_until|date:"SHORT_DATETIME_FORMAT" %}
+                                                    Valid until {{ datetime }}
+                                                {% endblocktrans %}
+                                            {% endif %}
+                                        </dd>
+                                    </div>
                                 {% endif %}
                                 {% if not line.canceled %}
                                     <div class="position-buttons">
@@ -454,12 +501,12 @@
                                 {% endif %}
                                 {% if line.has_questions %}
                                     <dl>
-                                        {% if line.item.admission and event.settings.attendee_names_asked %}
+                                        {% if line.item.ask_attendee_data and event.settings.attendee_names_asked %}
                                             <dt>{% trans "Attendee name" %}</dt>
                                             <dd>{% if line.attendee_name %}{{ line.attendee_name }}{% else %}
                                                 <em>{% trans "not answered" %}</em>{% endif %}</dd>
                                         {% endif %}
-                                        {% if line.item.admission and event.settings.attendee_emails_asked %}
+                                        {% if line.item.ask_attendee_data and event.settings.attendee_emails_asked %}
                                             <dt>{% trans "Attendee email" %}</dt>
                                             <dd>
                                                 {% if line.attendee_email %}
@@ -482,7 +529,7 @@
                                                 {% endif %}
                                             </dd>
                                         {% endif %}
-                                        {% if line.item.admission and event.settings.attendee_company_asked %}
+                                        {% if line.item.ask_attendee_data and event.settings.attendee_company_asked %}
                                             <dt>
                                                 {% trans "Attendee company" %}
                                             </dt>
@@ -490,7 +537,7 @@
                                                 {% if line.company %}{{ line.company }}{% else %}<em>{% trans "not answered" %}</em>{% endif %}
                                             </dd>
                                         {% endif %}
-                                        {% if line.item.admission and event.settings.attendee_addresses_asked %}
+                                        {% if line.item.ask_attendee_data and event.settings.attendee_addresses_asked %}
                                             <dt>
                                                 {% trans "Attendee address" %}
                                             </dt>
@@ -748,7 +795,7 @@
                                     {% endfor %}
                                     </tbody>
                                 </table>
-                                {% if order.payment_refund_sum > 0 %}
+                                {% if order.payment_refund_sum > 0 and "can_change_orders" in request.eventpermset %}
                                     <a href="{% url "control:event.order.refunds.start" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default">
                                         {% trans "Create a refund" %}
                                     </a>
@@ -936,9 +983,11 @@
                                 {% bootstrap_field comment_form.comment show_help=True show_label=False %}
                                 {% bootstrap_field comment_form.custom_followup_at %}
                                 {% bootstrap_field comment_form.checkin_attention show_help=True show_label=False %}
-                                <button class="btn btn-default">
-                                    {% trans "Update comment" %}
-                                </button>
+                                {% if "can_change_orders" in request.eventpermset %}
+                                    <button class="btn btn-default">
+                                        {% trans "Update comment" %}
+                                    </button>
+                                {% endif %}
                             </form>
                         </div>
                     </div>

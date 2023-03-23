@@ -166,7 +166,7 @@ body.loading .container {
     font-size: 120px;
     color: $brand-primary;
 }
-#loadingmodal, #ajaxerr, #cookie-consent-modal {
+#loadingmodal, #ajaxerr, #cookie-consent-modal, #popupmodal {
     position: fixed;
     top: 0;
     left: 0;
@@ -181,6 +181,11 @@ body.loading .container {
     .big-icon {
         margin-top: 50px;
         font-size: 200px;
+        color: $brand-primary;
+    }
+    &#popupmodal .big-icon {
+        margin-top: 10px;
+        font-size: 100px;
         color: $brand-primary;
     }
 
@@ -231,7 +236,7 @@ body.loading .container {
     }
 }
 @media (max-width: 700px) {
-    #loadingmodal, #ajaxerr, #cookie-consent-modal {
+    #loadingmodal, #ajaxerr, #cookie-consent-modal, #popupmodal {
         .modal-card {
             margin: 25px auto 0;
             max-height: calc(100vh - 50px - 20px);
@@ -253,7 +258,7 @@ body.loading .container {
     background: rgba(236, 236, 236, .9);
 }
 
-.loading #loadingmodal, .ajaxerr #ajaxerr {
+.loading #loadingmodal, .ajaxerr #ajaxerr, .has-popup #popupmodal {
     opacity: 1;
     visibility: visible;
     transition: opacity .5s ease-in-out;
@@ -290,16 +295,17 @@ body.loading .container {
         margin-right: auto;
         margin-bottom: 3em;
 
-        .fa {
+        & > .fa {
             float: left;
             margin-right: 30px;
+            margin-left: 0;
         }
 
         h2 {
             padding-top: 35px;
         }
 
-        p {
+        & > * {
             margin-left: 158px;
         }
     }
@@ -345,8 +351,8 @@ body.loading .container {
 
 .panel-title a[data-toggle="collapse"], details .panel-title {
     display: flex;
-    padding: 10px 15px;
-    margin: -10px -15px;
+    padding: 0.75*$line-height-computed;
+    margin: -0.75*$line-height-computed;
     align-items: center;
     justify-content: space-between;
     outline: 0;
@@ -361,6 +367,14 @@ body.loading .container {
     background-color: darken($btn-primary-bg, 10%);
 }
 
+.panel-title a.h6 {
+    text-decoration: underline;
+    margin-left: .5em;
+}
+.panel-title a.h6 .fa {
+    margin-left: .25em;
+    margin-right: .25em;
+}
 
 details {
     list-style: none;
@@ -375,7 +389,9 @@ details summary {
     -webkit-user-select: none;
     user-select: none;
 }
-.nojs details[open] .collapse-indicator, details.details-open .collapse-indicator {
+.nojs details[open] .panel-heading .collapse-indicator,
+details.details-open .panel-heading .collapse-indicator,
+[aria-expanded=true]>.collapse-indicator {
     -webkit-transform: rotate(180deg);
     -ms-transform: rotate(180deg);
     -moz-transform: rotate(180deg);

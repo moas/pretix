@@ -63,6 +63,7 @@ from pretix.base.payment import BasePaymentProvider, PaymentException
 from pretix.base.plugins import get_all_plugins
 from pretix.base.services.mail import SendMailException
 from pretix.base.settings import SettingsSandbox
+from pretix.helpers import OF_SELF
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri, eventreverse
 from pretix.plugins.stripe.forms import StripeKeyValidator
@@ -166,6 +167,11 @@ class StripeSettingsHolder(BasePaymentProvider):
                          label=_('Stripe account'),
                          disabled=True
                      )),
+                    ('connect_user_id',
+                     forms.CharField(
+                         label=_('Stripe account'),
+                         disabled=True
+                     )),
                     ('endpoint',
                      forms.ChoiceField(
                          label=_('Endpoint'),
@@ -211,6 +217,21 @@ class StripeSettingsHolder(BasePaymentProvider):
                                  'country of residence.'),
                  )),
             ]
+
+        extra_fields = [
+            ('postfix',
+             forms.CharField(
+                 label=_('Statement descriptor postfix'),
+                 help_text=_('Any value entered here will be shown on the customer\'s credit card bill or bank account '
+                             'transaction. We will automatically add the order code in front of it. Note that depending '
+                             'on the payment method, only a very limited number of characters is allowed. We do not '
+                             'recommend entering more than {cnt} characters into this field.').format(
+                     cnt=22 - 1 - settings.ENTROPY['order_code']
+                 ),
+                 required=False,
+             )),
+        ]
+
         d = OrderedDict(
             fields + [
                 ('method_cc',
@@ -288,7 +309,7 @@ class StripeSettingsHolder(BasePaymentProvider):
                      help_text=_('Needs to be enabled in your Stripe account first.'),
                      required=False,
                  )),
-            ] + list(super().settings_form_fields.items()) + moto_settings
+            ] + extra_fields + list(super().settings_form_fields.items()) + moto_settings
         )
         if not self.settings.connect_client_id or self.settings.secret_key:
             d['connect_destination'] = forms.CharField(
@@ -373,11 +394,21 @@ class StripeMethod(BasePaymentProvider):
         return d
 
     def statement_descriptor(self, payment, length=22):
-        return '{event}-{code} {eventname}'.format(
-            event=self.event.slug.upper(),
-            code=payment.order.code,
-            eventname=re.sub('[^a-zA-Z0-9 ]', '', str(self.event.name))
-        )[:length]
+        if self.settings.postfix:
+            # If a custom postfix is set, we only transmit the order code, so we have as much room as possible for
+            # the postfix.
+            return '{code} {postfix}'.format(
+                code=payment.order.code,
+                postfix=self.settings.postfix,
+            )[:length]
+        else:
+            # If no custom postfix is set, we transmit the event slug and event name for backwards compatibility
+            # with older pretix versions.
+            return '{event}-{code} {eventname}'.format(
+                event=self.event.slug.upper(),
+                code=payment.order.code,
+                eventname=re.sub('[^a-zA-Z0-9 ]', '', str(self.event.name))
+            )[:length]
 
     @property
     def api_kwargs(self):
@@ -399,7 +430,7 @@ class StripeMethod(BasePaymentProvider):
         return kwargs
 
     def _init_api(self):
-        stripe.api_version = '2019-05-16'
+        stripe.api_version = '2022-08-01'
         stripe.set_app_info(
             "pretix",
             partner_id="pp_partner_FSaz4PpKIur7Ox",
@@ -526,10 +557,18 @@ class StripeMethod(BasePaymentProvider):
     def matching_id(self, payment: OrderPayment):
         return payment.info_data.get("id", None)
 
+    def refund_matching_id(self, refund: OrderRefund):
+        return refund.info_data.get('id', None)
+
     def api_payment_details(self, payment: OrderPayment):
         return {
             "id": payment.info_data.get("id", None),
             "payment_method": payment.info_data.get("payment_method", None)
+        }
+
+    def api_refund_details(self, refund: OrderRefund):
+        return {
+            "id": refund.info_data.get("id", None),
         }
 
     def payment_control_render(self, request, payment) -> str:
@@ -556,7 +595,7 @@ class StripeMethod(BasePaymentProvider):
         self._init_api()
 
         payment_info = refund.payment.info_data
-        OrderPayment.objects.select_for_update().get(pk=refund.payment.pk)
+        OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=refund.payment.pk)
 
         if not payment_info:
             raise PaymentException(_('No payment information found.'))
@@ -644,10 +683,14 @@ class StripeMethod(BasePaymentProvider):
 
     def redirect(self, request, url):
         if request.session.get('iframe_session', False):
-            signer = signing.Signer(salt='safe-redirect')
             return (
-                build_absolute_uri(request.event, 'plugins:stripe:redirect') + '?url=' +
-                urllib.parse.quote(signer.sign(url))
+                build_absolute_uri(request.event, 'plugins:stripe:redirect') +
+                '?data=' + signing.dumps({
+                    'url': url,
+                    'session': {
+                        'payment_stripe_order_secret': request.session['payment_stripe_order_secret'],
+                    },
+                }, salt='safe-redirect')
             )
         else:
             return str(url)
@@ -1192,7 +1235,7 @@ class StripeBancontact(StripeMethod):
 class StripeSofort(StripeMethod):
     identifier = 'stripe_sofort'
     verbose_name = _('SOFORT via Stripe')
-    public_name = _('SOFORT')
+    public_name = _('SOFORT (instant bank transfer)')
     method = 'sofort'
 
     def payment_form_render(self, request) -> str:

@@ -23,8 +23,6 @@ import datetime
 import time
 from decimal import Decimal
 from unittest import mock
-# deprecated: from django.utils.http import urlquote
-# use urlib instead
 from urllib.parse import quote as urlquote
 
 import pytest
@@ -34,6 +32,7 @@ from django_countries.fields import Country
 from django_scopes import scopes_disabled
 from i18nfield.strings import LazyI18nString
 from pytz import UTC
+from tests.const import SAMPLE_PNG
 
 from pretix.api.serializers.item import QuestionSerializer
 from pretix.base.models import (
@@ -70,7 +69,7 @@ def order(event, item, other_item, taxrule):
             total=46, locale='en'
         )
         InvoiceAddress.objects.create(order=o, company="Sample company", country=Country('NZ'))
-        OrderPosition.objects.create(
+        op1 = OrderPosition.objects.create(
             order=o,
             positionid=1,
             item=item,
@@ -89,6 +88,16 @@ def order(event, item, other_item, taxrule):
             attendee_name_parts={'full_name': "Michael"},
             secret="sf4HZG73fU6kwddgjg2QOusFbYZwVKpK",
             pseudonymization_id="BACDEFGHKL",
+        )
+        OrderPosition.objects.create(
+            order=o,
+            positionid=3,
+            item=other_item,
+            addon_to=op1,
+            variation=None,
+            price=Decimal("0"),
+            secret="3u4ez6vrrbgb3wvezxhq446p548dt2wn",
+            pseudonymization_id="FOOBAR12345",
         )
         return o
 
@@ -122,6 +131,9 @@ TEST_ORDERPOSITION1_RES = {
     "country": None,
     "state": None,
     "subevent": None,
+    "valid_from": None,
+    "valid_until": None,
+    "blocked": None,
     "pseudonymization_id": "ABCDEFGHKL",
 }
 
@@ -154,7 +166,45 @@ TEST_ORDERPOSITION2_RES = {
     "country": None,
     "state": None,
     "subevent": None,
+    "valid_from": None,
+    "valid_until": None,
+    "blocked": None,
     "pseudonymization_id": "BACDEFGHKL",
+}
+
+TEST_ORDERPOSITION3_RES = {
+    "id": 3,
+    "require_attention": False,
+    "order__status": "p",
+    "order": "FOO",
+    "positionid": 3,
+    "item": 1,
+    "variation": None,
+    "price": "0.00",
+    "attendee_name": "Peter",
+    "attendee_name_parts": {'full_name': "Peter"},
+    "attendee_email": None,
+    "voucher": None,
+    "tax_rate": "0.00",
+    "tax_value": "0.00",
+    "tax_rule": None,
+    "secret": "3u4ez6vrrbgb3wvezxhq446p548dt2wn",
+    "addon_to": None,
+    "checkins": [],
+    "downloads": [],
+    "answers": [],
+    "seat": None,
+    "company": None,
+    "street": None,
+    "zipcode": None,
+    "city": None,
+    "country": None,
+    "state": None,
+    "subevent": None,
+    "valid_from": None,
+    "valid_until": None,
+    "blocked": None,
+    "pseudonymization_id": "FOOBAR12345",
 }
 
 TEST_LIST_RES = {
@@ -168,6 +218,7 @@ TEST_LIST_RES = {
     "allow_entry_after_exit": True,
     "subevent": None,
     "exit_all_at": None,
+    "addon_match": False,
     "rules": {}
 }
 
@@ -186,13 +237,14 @@ def clist_all(event, item):
 
 
 @pytest.mark.django_db
-def test_list_list(token_client, organizer, event, clist, item, subevent):
+def test_list_list(token_client, organizer, event, clist, item, subevent, django_assert_num_queries):
     res = dict(TEST_LIST_RES)
     res["id"] = clist.pk
     res["limit_products"] = [item.pk]
     res["auto_checkin_sales_channels"] = []
 
-    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/'.format(organizer.slug, event.slug))
+    with django_assert_num_queries(11):
+        resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/'.format(organizer.slug, event.slug))
     assert resp.status_code == 200
     assert [res] == resp.data['results']
 
@@ -393,30 +445,35 @@ def test_list_update(token_client, organizer, event, clist):
 
 
 @pytest.mark.django_db
-def test_list_all_items_positions(token_client, organizer, event, clist, clist_all, item, other_item, order):
+def test_list_all_items_positions(token_client, organizer, event, clist, clist_all, item, other_item, order, django_assert_num_queries):
     with scopes_disabled():
         p1 = dict(TEST_ORDERPOSITION1_RES)
-        p1["id"] = order.positions.first().pk
+        p1["id"] = order.positions.get(positionid=1).pk
         p1["item"] = item.pk
         p2 = dict(TEST_ORDERPOSITION2_RES)
-        p2["id"] = order.positions.last().pk
+        p2["id"] = order.positions.get(positionid=2).pk
         p2["item"] = other_item.pk
+        p3 = dict(TEST_ORDERPOSITION3_RES)
+        p3["id"] = order.positions.get(positionid=3).pk
+        p3["item"] = other_item.pk
+        p3["addon_to"] = p1["id"]
 
     # All items
-    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=positionid'.format(
-        organizer.slug, event.slug, clist_all.pk
-    ))
+    with django_assert_num_queries(23):
+        resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=positionid'.format(
+            organizer.slug, event.slug, clist_all.pk
+        ))
     assert resp.status_code == 200
-    assert [p1, p2] == resp.data['results']
+    assert [p1, p2, p3] == resp.data['results']
 
     # Check-ins on other list ignored
     with scopes_disabled():
-        order.positions.first().checkins.create(list=clist)
+        c = order.positions.get(positionid=1).checkins.create(list=clist)
     resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=positionid'.format(
         organizer.slug, event.slug, clist_all.pk
     ))
     assert resp.status_code == 200
-    assert [p1, p2] == resp.data['results']
+    assert [p1, p2, p3] == resp.data['results']
     resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?has_checkin=1'.format(
         organizer.slug, event.slug, clist_all.pk
     ))
@@ -425,7 +482,7 @@ def test_list_all_items_positions(token_client, organizer, event, clist, clist_a
 
     # Only checked in
     with scopes_disabled():
-        c = order.positions.first().checkins.create(list=clist_all)
+        c = order.positions.get(positionid=1).checkins.create(list=clist_all)
     p1['checkins'] = [
         {
             'id': c.pk,
@@ -448,7 +505,7 @@ def test_list_all_items_positions(token_client, organizer, event, clist, clist_a
         organizer.slug, event.slug, clist_all.pk
     ))
     assert resp.status_code == 200
-    assert [p2] == resp.data['results']
+    assert [p2, p3] == resp.data['results']
 
     # Order by checkin
     resp = token_client.get(
@@ -456,18 +513,18 @@ def test_list_all_items_positions(token_client, organizer, event, clist, clist_a
             organizer.slug, event.slug, clist_all.pk
         ))
     assert resp.status_code == 200
-    assert [p1, p2] == resp.data['results']
+    assert resp.data['results'][0] == p1
     resp = token_client.get(
         '/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=last_checked_in'.format(
             organizer.slug, event.slug, clist_all.pk
         ))
     assert resp.status_code == 200
-    assert [p2, p1] == resp.data['results']
+    assert resp.data['results'][-1] == p1
 
     # Order by checkin date
     time.sleep(1)
     with scopes_disabled():
-        c = order.positions.last().checkins.create(list=clist_all)
+        c = order.positions.get(positionid=2).checkins.create(list=clist_all)
     p2['checkins'] = [
         {
             'id': c.pk,
@@ -480,23 +537,23 @@ def test_list_all_items_positions(token_client, organizer, event, clist, clist_a
         }
     ]
     resp = token_client.get(
-        '/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=-last_checked_in'.format(
+        '/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=-last_checked_in,positionid'.format(
             organizer.slug, event.slug, clist_all.pk
         ))
     assert resp.status_code == 200
-    assert [p2, p1] == resp.data['results']
+    assert [p2, p1, p3] == resp.data['results']
 
     # Order by attendee_name
-    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=-attendee_name'.format(
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=-attendee_name,positionid'.format(
         organizer.slug, event.slug, clist_all.pk
     ))
     assert resp.status_code == 200
-    assert [p1, p2] == resp.data['results']
-    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=attendee_name'.format(
+    assert [p1, p3, p2] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=attendee_name,positionid'.format(
         organizer.slug, event.slug, clist_all.pk
     ))
     assert resp.status_code == 200
-    assert [p2, p1] == resp.data['results']
+    assert [p2, p1, p3] == resp.data['results']
 
     # Paid only
     order.status = Order.STATUS_PENDING
@@ -513,32 +570,41 @@ def test_list_all_items_positions(token_client, organizer, event, clist, clist_a
     assert resp.status_code == 200
     p1['order__status'] = 'n'
     p2['order__status'] = 'n'
-    assert [p2, p1] == resp.data['results']
+    p3['order__status'] = 'n'
+    assert [p2, p1, p3] == resp.data['results']
 
 
 @pytest.mark.django_db
 def test_list_all_items_positions_by_subevent(token_client, organizer, event, clist, clist_all, item, other_item, order, subevent):
     with scopes_disabled():
         se2 = event.subevents.create(name="Foobar", date_from=datetime.datetime(2017, 12, 27, 10, 0, 0, tzinfo=UTC))
-        pfirst = order.positions.first()
+        pfirst = order.positions.get(positionid=1)
         pfirst.subevent = se2
         pfirst.save()
         p1 = dict(TEST_ORDERPOSITION1_RES)
         p1["id"] = pfirst.pk
         p1["subevent"] = se2.pk
         p1["item"] = item.pk
-        plast = order.positions.last()
-        plast.subevent = subevent
-        plast.save()
+        psecond = order.positions.get(positionid=2)
+        psecond.subevent = subevent
+        psecond.save()
         p2 = dict(TEST_ORDERPOSITION2_RES)
-        p2["id"] = plast.pk
+        p2["id"] = psecond.pk
         p2["item"] = other_item.pk
         p2["subevent"] = subevent.pk
+        pthird = order.positions.get(positionid=3)
+        pthird.subevent = se2
+        pthird.save()
+        p3 = dict(TEST_ORDERPOSITION3_RES)
+        p3["id"] = pthird.pk
+        p3["addon_to"] = pfirst.pk
+        p3["item"] = other_item.pk
+        p3["subevent"] = se2.pk
     resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?ordering=positionid'.format(
         organizer.slug, event.slug, clist_all.pk
     ))
     assert resp.status_code == 200
-    assert [p1, p2] == resp.data['results']
+    assert [p1, p2, p3] == resp.data['results']
 
     clist_all.subevent = subevent
     clist_all.save()
@@ -593,7 +659,7 @@ def test_status(token_client, organizer, event, clist_all, item, other_item, ord
     ))
     assert resp.status_code == 200
     assert resp.data['checkin_count'] == 1
-    assert resp.data['position_count'] == 2
+    assert resp.data['position_count'] == 3
     assert resp.data['inside_count'] == 1
     assert resp.data['items'] == [
         {
@@ -622,10 +688,26 @@ def test_status(token_client, organizer, event, clist_all, item, other_item, ord
             'id': other_item.pk,
             'checkin_count': 0,
             'admission': False,
-            'position_count': 1,
+            'position_count': 2,
             'variations': []
         }
     ]
+
+
+def _redeem(token_client, org, clist, p, body=None):
+    return token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
+        org.slug, clist.event.slug, clist.pk, p
+    ), body or {}, format='json')
+
+
+@pytest.mark.django_db
+def test_query_load(token_client, organizer, clist, event, order, django_assert_max_num_queries):
+    with scopes_disabled():
+        p = order.positions.first().pk
+    with django_assert_max_num_queries(30):
+        resp = _redeem(token_client, organizer, clist, p)
+    assert resp.status_code == 201
+    assert resp.data['status'] == 'ok'
 
 
 @pytest.mark.django_db
@@ -634,11 +716,9 @@ def test_custom_datetime(token_client, organizer, clist, event, order):
     dt = dt.replace(microsecond=0)
     with scopes_disabled():
         p = order.positions.first().pk
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p
-    ), {
+    resp = _redeem(token_client, organizer, clist, p, {
         'datetime': dt.isoformat()
-    }, format='json')
+    })
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -654,9 +734,7 @@ def test_name_fallback(token_client, organizer, clist, event, order):
     op.attendee_name_cached = None
     op.attendee_name_parts = {}
     op.save()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, op.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, op.pk, {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     assert resp.data['position']['attendee_name'] == 'Paul'
@@ -667,9 +745,7 @@ def test_name_fallback(token_client, organizer, clist, event, order):
 def test_by_secret(token_client, organizer, clist, event, order):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.secret
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.secret, {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -680,9 +756,7 @@ def test_by_secret_special_chars(token_client, organizer, clist, event, order):
         p = order.positions.first()
     p.secret = "abc+-/=="
     p.save()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, urlquote(p.secret, safe='')
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, urlquote(p.secret, safe=''), {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -693,9 +767,7 @@ def test_by_secret_special_chars_space_fallback(token_client, organizer, clist, 
         p = order.positions.first()
     p.secret = "foo bar"
     p.save()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, "foo+bar"
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, "foo+bar", {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -704,14 +776,10 @@ def test_by_secret_special_chars_space_fallback(token_client, organizer, clist, 
 def test_only_once(token_client, organizer, clist, event, order):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'already_redeemed'
@@ -721,14 +789,10 @@ def test_only_once(token_client, organizer, clist, event, order):
 def test_reupload_same_nonce(token_client, organizer, clist, event, order):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'nonce': 'foobar'}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'nonce': 'foobar'})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'nonce': 'foobar'}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'nonce': 'foobar'})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -739,14 +803,10 @@ def test_allow_multiple(token_client, organizer, clist, event, order):
     clist.save()
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -759,14 +819,10 @@ def test_allow_multiple_reupload_same_nonce(token_client, organizer, clist, even
     clist.save()
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'nonce': 'foobar'}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'nonce': 'foobar'})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'nonce': 'foobar'}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'nonce': 'foobar'})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -777,14 +833,10 @@ def test_allow_multiple_reupload_same_nonce(token_client, organizer, clist, even
 def test_multiple_different_list(token_client, organizer, clist, clist_all, event, order):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'nonce': 'foobar'}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'nonce': 'foobar'})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist_all.pk, p.pk
-    ), {'nonce': 'baz'}, format='json')
+    resp = _redeem(token_client, organizer, clist_all, p.pk, {'nonce': 'baz'})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -793,14 +845,10 @@ def test_multiple_different_list(token_client, organizer, clist, clist_all, even
 def test_forced_multiple(token_client, organizer, clist, event, order):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'force': True}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'force': True})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -809,18 +857,16 @@ def test_forced_multiple(token_client, organizer, clist, event, order):
 def test_forced_flag_set_if_required(token_client, organizer, clist, event, order):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'force': True}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'force': True})
     with scopes_disabled():
         assert not p.checkins.order_by('pk').last().forced
+        assert p.checkins.order_by('pk').last().force_sent
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'force': True}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'force': True})
     with scopes_disabled():
         assert p.checkins.order_by('pk').last().forced
+        assert p.checkins.order_by('pk').last().force_sent
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -831,9 +877,7 @@ def test_require_product(token_client, organizer, clist, event, order):
         clist.limit_products.clear()
         p = order.positions.first()
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'product'
@@ -846,32 +890,24 @@ def test_require_paid(token_client, organizer, clist, event, order):
 
     order.status = Order.STATUS_CANCELED
     order.save()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'unpaid'
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'canceled_supported': True}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'canceled_supported': True})
     assert resp.status_code == 400
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'canceled'
 
     order.status = Order.STATUS_PENDING
     order.save()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'unpaid'
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'ignore_unpaid': True}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'ignore_unpaid': True})
     assert resp.status_code == 400
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'unpaid'
@@ -879,16 +915,12 @@ def test_require_paid(token_client, organizer, clist, event, order):
     clist.include_pending = True
     clist.save()
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'unpaid'
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'ignore_unpaid': True}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'ignore_unpaid': True})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -910,17 +942,13 @@ def test_question_number(token_client, organizer, clist, event, order, question)
     question[0].type = 'N'
     question[0].save()
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
         assert resp.data['questions'] == [QuestionSerializer(question[0]).data]
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: "3.24"}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: "3.24"}})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -931,17 +959,13 @@ def test_question_number(token_client, organizer, clist, event, order, question)
 def test_question_choice(token_client, organizer, clist, event, order, question):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
         assert resp.data['questions'] == [QuestionSerializer(question[0]).data]
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: str(question[1].pk)}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: str(question[1].pk)}})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -953,17 +977,13 @@ def test_question_choice(token_client, organizer, clist, event, order, question)
 def test_question_choice_identifier(token_client, organizer, clist, event, order, question):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
         assert resp.data['questions'] == [QuestionSerializer(question[0]).data]
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: str(question[1].identifier)}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: str(question[1].identifier)}})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -975,9 +995,7 @@ def test_question_choice_identifier(token_client, organizer, clist, event, order
 def test_question_invalid(token_client, organizer, clist, event, order, question):
     with scopes_disabled():
         p = order.positions.first()
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: "A"}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: "A"}})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
@@ -991,17 +1009,13 @@ def test_question_required(token_client, organizer, clist, event, order, questio
     question[0].required = True
     question[0].save()
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
         assert resp.data['questions'] == [QuestionSerializer(question[0]).data]
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: ""}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: ""}})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
@@ -1015,17 +1029,13 @@ def test_question_optional(token_client, organizer, clist, event, order, questio
     question[0].required = False
     question[0].save()
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {}})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
         assert resp.data['questions'] == [QuestionSerializer(question[0]).data]
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: ""}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: ""}})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
 
@@ -1037,17 +1047,13 @@ def test_question_multiple_choice(token_client, organizer, clist, event, order, 
     question[0].type = 'M'
     question[0].save()
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
         assert resp.data['questions'] == [QuestionSerializer(question[0]).data]
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: "{},{}".format(question[1].pk, question[2].pk)}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: "{},{}".format(question[1].pk, question[2].pk)}})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -1061,7 +1067,7 @@ def test_question_upload(token_client, organizer, clist, event, order, question)
         '/api/v1/upload',
         data={
             'media_type': 'image/png',
-            'file': ContentFile('file.png', 'invalid png content')
+            'file': ContentFile(SAMPLE_PNG)
         },
         format='upload',
         HTTP_CONTENT_DISPOSITION='attachment; filename="file.png"',
@@ -1074,23 +1080,17 @@ def test_question_upload(token_client, organizer, clist, event, order, question)
     question[0].type = 'F'
     question[0].save()
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
     with scopes_disabled():
         assert resp.data['questions'] == [QuestionSerializer(question[0]).data]
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: "invalid"}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: "invalid"}})
     assert resp.status_code == 400
     assert resp.data['status'] == 'incomplete'
 
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, p.pk
-    ), {'answers': {question[0].pk: file_id_png}}, format='json')
+    resp = _redeem(token_client, organizer, clist, p.pk, {'answers': {question[0].pk: file_id_png}})
     assert resp.status_code == 201
     assert resp.data['status'] == 'ok'
     with scopes_disabled():
@@ -1142,11 +1142,7 @@ def test_store_failed(token_client, organizer, clist, event, order):
 
 @pytest.mark.django_db
 def test_redeem_unknown(token_client, organizer, clist, event, order):
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, 'unknown_secret'
-    ), {
-        'force': True
-    }, format='json')
+    resp = _redeem(token_client, organizer, clist, 'unknown_secret', {'force': True})
     assert resp.status_code == 404
     assert resp.data["status"] == "error"
     assert resp.data["reason"] == "invalid"
@@ -1159,10 +1155,7 @@ def test_redeem_unknown_revoked(token_client, organizer, clist, event, order):
     with scopes_disabled():
         p = order.positions.first()
         event.revoked_secrets.create(position=p, secret='revoked_secret')
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, 'revoked_secret'
-    ), {
-    }, format='json')
+    resp = _redeem(token_client, organizer, clist, 'revoked_secret', {})
     assert resp.status_code == 400
     assert resp.data["status"] == "error"
     assert resp.data["reason"] == "revoked"
@@ -1175,28 +1168,22 @@ def test_redeem_unknown_revoked_force(token_client, organizer, clist, event, ord
     with scopes_disabled():
         p = order.positions.first()
         event.revoked_secrets.create(position=p, secret='revoked_secret')
-    resp = token_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, 'revoked_secret'
-    ), {
-        'force': True
-    }, format='json')
+    resp = _redeem(token_client, organizer, clist, 'revoked_secret', {'force': True})
     assert resp.status_code == 201
     assert resp.data["status"] == "ok"
     with scopes_disabled():
-        assert Checkin.objects.last().forced
+        ci = Checkin.objects.last()
+        assert ci.forced
+        assert ci.force_sent
+        assert ci.position == p
 
 
 @pytest.mark.django_db
-def test_redeem_unknown_legacy_device_bug(device, device_client, organizer, clist, event, order):
+def test_redeem_unknown_legacy_device_bug(device, device_client, organizer, clist, event):
     device.software_brand = "pretixSCAN"
     device.software_version = "1.11.1"
     device.save()
-    resp = device_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, 'unknown_secret'
-    ), {
-        'force': True
-    }, format='json')
-    print(resp.data)
+    resp = _redeem(device_client, organizer, clist, 'unknown_secret', {'force': True})
     assert resp.status_code == 400
     assert resp.data["status"] == "error"
     assert resp.data["reason"] == "already_redeemed"
@@ -1206,13 +1193,139 @@ def test_redeem_unknown_legacy_device_bug(device, device_client, organizer, clis
     device.software_brand = "pretixSCAN"
     device.software_version = "1.11.2"
     device.save()
-    resp = device_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/'.format(
-        organizer.slug, event.slug, clist.pk, 'unknown_secret'
-    ), {
-        'force': True
-    }, format='json')
+    resp = _redeem(device_client, organizer, clist, 'unknown_secret', {'force': True})
     assert resp.status_code == 404
     assert resp.data["status"] == "error"
     assert resp.data["reason"] == "invalid"
     with scopes_disabled():
         assert not Checkin.objects.last()
+
+
+@pytest.mark.django_db
+def test_redeem_by_id_not_allowed_if_pretixscan(device, device_client, organizer, clist, event, order):
+    with scopes_disabled():
+        p = order.positions.first()
+    device.software_brand = "pretixSCAN"
+    device.software_version = "1.14.2"
+    device.save()
+    resp = _redeem(device_client, organizer, clist, p.pk, {'force': True})
+    assert resp.status_code == 404
+    resp = _redeem(device_client, organizer, clist, p.secret, {'force': True})
+    assert resp.status_code == 201
+
+
+@pytest.mark.django_db
+def test_redeem_by_id_not_allowed_if_untrusted(device, device_client, organizer, clist, event, order):
+    with scopes_disabled():
+        p = order.positions.first()
+    resp = device_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/?untrusted_input=true'.format(
+        organizer.slug, event.slug, clist.pk, p.pk
+    ), {
+        'force': True
+    }, format='json')
+    assert resp.status_code == 404
+    resp = device_client.post('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/{}/redeem/?untrusted_input=true'.format(
+        organizer.slug, event.slug, clist.pk, p.secret
+    ), {
+        'force': True
+    }, format='json')
+    assert resp.status_code == 201
+
+
+@pytest.mark.django_db
+def test_redeem_addon_if_match_disabled(token_client, organizer, clist, other_item, event, order):
+    with scopes_disabled():
+        clist.all_products = False
+        clist.save()
+        clist.limit_products.set([other_item])
+    resp = _redeem(token_client, organizer, clist, 'z3fsn8jyufm5kpk768q69gkbyr5f4h6w', {})
+    assert resp.status_code == 400
+    assert resp.data["status"] == "error"
+    assert resp.data["reason"] == "product"
+    with scopes_disabled():
+        assert not Checkin.objects.last()
+
+
+@pytest.mark.django_db
+def test_redeem_addon_if_match_enabled(token_client, organizer, clist, other_item, event, order):
+    with scopes_disabled():
+        clist.all_products = False
+        clist.addon_match = True
+        clist.save()
+        clist.limit_products.set([other_item])
+        p = order.positions.first().addons.all().first()
+    resp = _redeem(token_client, organizer, clist, 'z3fsn8jyufm5kpk768q69gkbyr5f4h6w', {})
+    assert resp.status_code == 201
+    assert resp.data['status'] == 'ok'
+    assert resp.data['position']['attendee_name'] == 'Peter'  # test propagation of names
+    assert resp.data['position']['item'] == other_item.pk
+    with scopes_disabled():
+        ci = Checkin.objects.last()
+        assert ci.position == p
+
+
+@pytest.mark.django_db
+def test_redeem_addon_if_match_ambiguous(token_client, organizer, clist, item, other_item, event, order):
+    with scopes_disabled():
+        clist.all_products = False
+        clist.addon_match = True
+        clist.save()
+        clist.limit_products.set([item, other_item])
+    resp = _redeem(token_client, organizer, clist, 'z3fsn8jyufm5kpk768q69gkbyr5f4h6w', {})
+    assert resp.status_code == 400
+    assert resp.data["status"] == "error"
+    assert resp.data["reason"] == "ambiguous"
+    with scopes_disabled():
+        assert not Checkin.objects.last()
+
+
+@pytest.mark.django_db
+def test_redeem_addon_if_match_and_revoked_force(token_client, organizer, clist, other_item, event, order):
+    with scopes_disabled():
+        event.revoked_secrets.create(position=order.positions.get(positionid=1), secret='revoked_secret')
+        clist.all_products = False
+        clist.addon_match = True
+        clist.save()
+        clist.limit_products.set([other_item])
+        p = order.positions.first().addons.all().first()
+    resp = _redeem(token_client, organizer, clist, 'revoked_secret', {'force': True})
+    assert resp.status_code == 201
+    assert resp.data["status"] == "ok"
+    with scopes_disabled():
+        ci = Checkin.objects.last()
+        assert ci.forced
+        assert ci.force_sent
+        assert ci.position == p
+
+
+@pytest.mark.django_db
+def test_search(token_client, organizer, event, clist, clist_all, item, other_item, order, django_assert_max_num_queries):
+    with scopes_disabled():
+        p1 = dict(TEST_ORDERPOSITION1_RES)
+        p1["id"] = order.positions.get(positionid=1).pk
+        p1["item"] = item.pk
+
+    with django_assert_max_num_queries(17):
+        resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?search=z3fsn8jyu'.format(
+            organizer.slug, event.slug, clist_all.pk
+        ))
+    assert resp.status_code == 200
+    assert [p1] == resp.data['results']
+    assert not resp.data['results'][0].get('pdf_data')
+
+
+@pytest.mark.django_db
+def test_checkin_pdf_data_requires_permission(token_client, event, team, organizer, clist_all, order):
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?search=z3fsn8jyu&pdf_data=true'.format(
+        organizer.slug, event.slug, clist_all.pk
+    ))
+    assert resp.data['results'][0].get('pdf_data')
+    with scopes_disabled():
+        team.can_view_orders = False
+        team.can_change_orders = False
+        team.can_checkin_orders = True
+        team.save()
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/checkinlists/{}/positions/?search=z3fsn8jyu&pdf_data=true'.format(
+        organizer.slug, event.slug, clist_all.pk
+    ))
+    assert not resp.data['results'][0].get('pdf_data')

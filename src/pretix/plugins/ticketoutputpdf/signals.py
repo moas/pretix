@@ -23,17 +23,19 @@ import copy
 import json
 
 from django.dispatch import receiver
+from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.html import escape
 from django.utils.translation import gettext_lazy as _
 
 from pretix.base.channels import get_all_sales_channels
+from pretix.base.models import Event
 from pretix.base.signals import (  # NOQA: legacy import
     EventPluginSignal, event_copy_data, item_copy_data, layout_text_variables,
     logentry_display, logentry_object_link, register_data_exporters,
     register_multievent_data_exporters, register_ticket_outputs,
 )
-from pretix.control.signals import item_forms
+from pretix.control.signals import item_forms, order_position_buttons
 from pretix.plugins.ticketoutputpdf.forms import TicketLayoutItemForm
 from pretix.plugins.ticketoutputpdf.models import (
     TicketLayout, TicketLayoutItem,
@@ -102,9 +104,15 @@ def pdf_event_copy_data_receiver(sender, other, item_map, question_map, **kwargs
         for o in layout:
             if o['type'] == 'textarea':
                 if o['content'].startswith('question_'):
-                    newq = question_map.get(int(o['content'][9:]))
-                    if newq:
-                        o['content'] = 'question_{}'.format(newq.pk)
+                    try:
+                        newq = question_map.get(int(o['content'][9:]))
+                    except ValueError:
+                        # int cannot convert new placeholders question_{identifier}
+                        # can be safely ignored as only old format questions_{pk} should be converted
+                        pass
+                    else:
+                        if newq:
+                            o['content'] = 'question_{}'.format(newq.pk)
         bl.layout = json.dumps(layout)
 
         bl.save()
@@ -152,6 +160,53 @@ def pdf_logentry_object_link(sender, logentry, **kwargs):
     }
     a_map['val'] = '<a href="{href}">{val}</a>'.format_map(a_map)
     return a_text.format_map(a_map)
+
+
+def _ticket_layouts_for_item(request, item):
+    if not hasattr(request, '_ticket_layouts_for_item'):
+        request._ticket_layouts_for_item = {}
+    if item.pk not in request._ticket_layouts_for_item:
+        request._ticket_layouts_for_item[item.pk] = {
+            tli.sales_channel: tli.layout
+            for tli in item.ticketlayout_assignments.select_related('layout')
+        }
+        if request._ticket_layouts_for_item[item.pk] and 'web' not in request._ticket_layouts_for_item[item.pk]:
+            request._ticket_layouts_for_item[item.pk]['web'] = request.event.ticket_layouts.get(default=True)
+
+    return request._ticket_layouts_for_item[item.pk]
+
+
+@receiver(order_position_buttons, dispatch_uid="pretix_ticketoutputpdf_control_order_buttons")
+def control_order_position_info(sender: Event, position, request, order, **kwargs):
+    if not position.generate_ticket:
+        return ''
+
+    layouts = []
+    seen = set()
+    lm = _ticket_layouts_for_item(request, position.item)
+    if order.sales_channel in lm:
+        seen.add(lm[order.sales_channel])
+    for k, l in lm.items():
+        if k == order.sales_channel or l in seen:
+            continue
+        layouts.append({
+            'label': str(l.name),
+            'channel': k,
+        })
+        seen.add(l)
+
+    if not layouts:
+        return ''
+
+    template = get_template('pretixplugins/ticketoutputpdf/control_order_position_buttons.html')
+    ctx = {
+        'order': position.order,
+        'request': request,
+        'event': sender,
+        'position': position,
+        'layouts': layouts,
+    }
+    return template.render(ctx, request=request).strip()
 
 
 override_layout = EventPluginSignal()

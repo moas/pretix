@@ -27,7 +27,11 @@
 {% block custom_header %}
     {{ block.super }}
     <meta property="og:title" content="{{ ev.name }}" />
-    <meta property="og:description" content="{{ ev.get_date_range_display }}" />
+    {% if request.event.has_subevents and not subevent %}
+        <meta property="og:description" content="{% trans "Event series" %}" />
+    {% else %}
+        <meta property="og:description" content="{{ ev.get_date_range_display }}" />
+    {% endif %}
     {% if subevent %}
         <meta property="og:url" content="{% abseventurl request.event "presale:event.index" subevent=subevent.pk %}" />
     {% else %}
@@ -66,7 +70,7 @@
             {% endif %}
         {% endif %}
 
-        {% if subevent and "year" not in request.GET %}
+        {% if subevent and "date" not in request.GET %}
             <p>
             {% if show_cart %}
                 <button class="subevent-toggle btn btn-primary btn-block btn-lg" aria-expanded="false">
@@ -136,7 +140,7 @@
                         {{ event.settings.presale_has_ended_text|rich_text }}
                     {% else %}
                         {% blocktrans trimmed %}
-                            The presale period for this event is over.
+                            The booking period for this event is over.
                         {% endblocktrans %}
                     {% endif %}
                 {% elif event.settings.presale_start_show_date %}
@@ -144,14 +148,14 @@
                     {% with time=ev.effective_presale_start|time:"TIME_FORMAT" time_24h=ev.effective_presale_start|time:"H:i" %}
                         <span data-time="{{ ev.effective_presale_start.isoformat }}" data-timezone="{{ request.event.timezone }}">
                             {% blocktrans trimmed with date="<time datetime='"|add:date_normalized|add:"'>"|add:date|add:"</time>"|safe time="<time datetime='"|add:time_24h|add:"'>"|add:time|add:"</time>"|safe %}
-                                The presale for this event will start on {{ date }} at {{ time }}.
+                                The booking period for this event will start on {{ date }} at {{ time }}.
                             {% endblocktrans %}
                         </span>
                     {% endwith %}
                     {% endwith %}
                 {% else %}
                     {% blocktrans trimmed %}
-                        The presale for this event has not yet started.
+                        The booking period for this event has not yet started.
                     {% endblocktrans %}
                 {% endif %}
             </div>

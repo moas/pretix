@@ -114,7 +114,7 @@ def order(event, item, taxrule, question):
         o.fees.create(fee_type=OrderFee.FEE_TYPE_PAYMENT, value=Decimal('0.25'), tax_rate=Decimal('19.00'),
                       tax_value=Decimal('0.05'), tax_rule=taxrule, canceled=True)
         InvoiceAddress.objects.create(order=o, company="Sample company", country=Country('NZ'),
-                                      vat_id="DE123", vat_id_validated=True)
+                                      vat_id="DE123", vat_id_validated=True, custom_field="Custom info")
         op = OrderPosition.objects.create(
             order=o,
             item=item,
@@ -157,6 +157,7 @@ TEST_ORDERPOSITION_RES = {
     "attendee_name": "Peter",
     "attendee_email": None,
     "voucher": None,
+    "discount": None,
     "tax_rate": "0.00",
     "tax_value": "0.00",
     "tax_rule": None,
@@ -172,6 +173,9 @@ TEST_ORDERPOSITION_RES = {
     "city": None,
     "country": None,
     "state": None,
+    "valid_from": None,
+    "valid_until": None,
+    "blocked": None,
     "answers": [
         {
             "question": 1,
@@ -218,6 +222,7 @@ TEST_REFUNDS_RES = [
         "execution_date": "2017-12-01T10:00:00Z",
         "comment": None,
         "provider": "stripe",
+        "details": {"id": None},
         "state": "done",
         "amount": "23.00"
     },
@@ -264,10 +269,12 @@ TEST_ORDER_RES = {
         "country": "NZ",
         "state": "",
         "internal_reference": "",
+        "custom_field": "Custom info",
         "vat_id": "DE123",
         "vat_id_validated": True
     },
     "require_approval": False,
+    "valid_if_pending": False,
     "positions": [TEST_ORDERPOSITION_RES],
     "downloads": [],
     "payments": TEST_PAYMENTS_RES,
@@ -316,6 +323,21 @@ def test_order_list_filter_subevent_date(token_client, organizer, event, order, 
     ))
     assert resp.status_code == 200
     assert [res] == resp.data['results']
+
+    # Test distinct-ness of results
+    with scopes_disabled():
+        OrderPosition.objects.create(
+            order=order,
+            item=item,
+            variation=None,
+            price=Decimal("23"),
+            canceled=False,
+            positionid=3,
+            subevent=subevent,
+        )
+    resp = token_client.get(
+        '/api/v1/organizers/{}/events/{}/orders/?subevent={}'.format(organizer.slug, event.slug, subevent.pk))
+    assert len(resp.data['results']) == 1
 
 
 @pytest.mark.django_db
@@ -437,6 +459,68 @@ def test_order_detail(token_client, organizer, event, order, item, taxrule, ques
     resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/?include_canceled_fees=true'.format(organizer.slug, event.slug, order.code))
     assert resp.status_code == 200
     assert len(resp.data['fees']) == 2
+
+
+@pytest.mark.django_db
+def test_include_exclude_fields(token_client, organizer, event, order, item, taxrule, question):
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/?exclude=positions.secret'.format(
+        organizer.slug, event.slug, order.code
+    ))
+    assert resp.status_code == 200
+    assert 'email' in resp.data
+    assert 'url' in resp.data
+    assert 'positions' in resp.data
+    assert 'subevent' in resp.data['positions'][0]
+    assert 'secret' not in resp.data['positions'][0]
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/?exclude=positions'.format(
+        organizer.slug, event.slug, order.code
+    ))
+    assert resp.status_code == 200
+    assert 'email' in resp.data
+    assert 'url' in resp.data
+    assert 'positions' not in resp.data
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/?exclude=email&exclude=url'.format(
+        organizer.slug, event.slug, order.code
+    ))
+    assert resp.status_code == 200
+    assert 'email' not in resp.data
+    assert 'url' not in resp.data
+    assert 'positions' in resp.data
+    assert 'secret' in resp.data['positions'][0]
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/?include=email'.format(
+        organizer.slug, event.slug, order.code
+    ))
+    assert resp.status_code == 200
+    assert 'email' in resp.data
+    assert 'url' not in resp.data
+    assert 'positions' not in resp.data
+
+    resp = token_client.get(
+        '/api/v1/organizers/{}/events/{}/orders/{}/?include=email&include=positions&include=invoice_address.name&exclude=positions.secret'.format(
+            organizer.slug, event.slug, order.code
+        )
+    )
+    assert resp.status_code == 200
+    assert 'email' in resp.data
+    assert 'url' not in resp.data
+    assert 'positions' in resp.data
+    assert 'subevent' in resp.data['positions'][0]
+    assert 'secret' not in resp.data['positions'][0]
+    assert 'city' not in resp.data['invoice_address']
+    assert 'name' in resp.data['invoice_address']
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/?include=email&include=positions.subevent'.format(
+        organizer.slug, event.slug, order.code
+    ))
+    assert resp.status_code == 200
+    assert 'email' in resp.data
+    assert 'url' not in resp.data
+    assert 'positions' in resp.data
+    assert 'subevent' in resp.data['positions'][0]
+    assert 'secret' not in resp.data['positions'][0]
 
 
 @pytest.mark.django_db
@@ -1105,11 +1189,23 @@ def test_order_mark_canceled_pending_fee_not_allowed(token_client, organizer, ev
         '/api/v1/organizers/{}/events/{}/orders/{}/mark_canceled/'.format(
             organizer.slug, event.slug, order.code
         ), data={
-            'cancellation_fee': '7.00'
+            'cancellation_fee': '700.00'
         }
     )
     assert resp.status_code == 400
-    assert resp.data == {'detail': 'The cancellation fee cannot be higher than the payment credit of this order.'}
+    assert resp.data == {'detail': 'The cancellation fee cannot be higher than the total amount of this order.'}
+    assert len(djmail.outbox) == 0
+
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/{}/mark_canceled/'.format(
+            organizer.slug, event.slug, order.code
+        ), data={
+            'cancellation_fee': '7.00'
+        }
+    )
+    assert resp.status_code == 200
+    assert resp.data['status'] == Order.STATUS_PENDING
+    assert len(djmail.outbox) == 1
 
 
 @pytest.mark.django_db
@@ -1504,6 +1600,25 @@ def test_refund_create_mark_refunded(token_client, organizer, event, order):
 
 
 @pytest.mark.django_db
+def test_refund_create_webhook_sent(token_client, organizer, event, order):
+    res = copy.deepcopy(REFUND_CREATE_PAYLOAD)
+    res['state'] = "done"
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/{}/refunds/'.format(
+            organizer.slug, event.slug, order.code
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        r = order.refunds.get(local_id=resp.data['local_id'])
+    assert r.provider == "manual"
+    assert r.amount == Decimal("23.00")
+    assert r.state == "done"
+    with scopes_disabled():
+        assert order.all_logentries().get(action_type="pretix.event.order.refund.done")
+
+
+@pytest.mark.django_db
 def test_refund_optional_fields(token_client, organizer, event, order):
     res = copy.deepcopy(REFUND_CREATE_PAYLOAD)
     del res['info']
@@ -1654,3 +1769,74 @@ def test_revoked_secret_list(token_client, organizer, event):
     ))
     assert resp.status_code == 200
     assert [res] == resp.data['results']
+
+
+@pytest.mark.django_db
+def test_blocked_secret_list(token_client, organizer, event):
+    r = event.blocked_secrets.create(secret="abcd", blocked=True)
+    res = {
+        "id": r.id,
+        "secret": "abcd",
+        "blocked": True,
+        "updated": r.updated.isoformat().replace("+00:00", "Z")
+    }
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/blockedsecrets/'.format(
+        organizer.slug, event.slug,
+    ))
+    assert resp.status_code == 200
+    assert [res] == resp.data['results']
+
+
+@pytest.mark.django_db
+def test_pdf_data(token_client, organizer, event, order, django_assert_max_num_queries):
+    # order detail
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/?pdf_data=true'.format(
+        organizer.slug, event.slug, order.code
+    ))
+    assert resp.status_code == 200
+    assert resp.data['positions'][0].get('pdf_data')
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/{}/'.format(
+        organizer.slug, event.slug, order.code
+    ))
+    assert resp.status_code == 200
+    assert not resp.data['positions'][0].get('pdf_data')
+
+    # order list
+    with django_assert_max_num_queries(29):
+        resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?pdf_data=true'.format(
+            organizer.slug, event.slug
+        ))
+    assert resp.status_code == 200
+    assert resp.data['results'][0]['positions'][0].get('pdf_data')
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/'.format(
+        organizer.slug, event.slug
+    ))
+    assert resp.status_code == 200
+    assert not resp.data['results'][0]['positions'][0].get('pdf_data')
+
+    # position list
+    with django_assert_max_num_queries(32):
+        resp = token_client.get('/api/v1/organizers/{}/events/{}/orderpositions/?pdf_data=true'.format(
+            organizer.slug, event.slug
+        ))
+    assert resp.status_code == 200
+    assert resp.data['results'][0].get('pdf_data')
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orderpositions/'.format(
+        organizer.slug, event.slug
+    ))
+    assert resp.status_code == 200
+    assert not resp.data['results'][0].get('pdf_data')
+
+    posid = resp.data['results'][0]['id']
+
+    # position detail
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orderpositions/{}/?pdf_data=true'.format(
+        organizer.slug, event.slug, posid
+    ))
+    assert resp.status_code == 200
+    assert resp.data.get('pdf_data')
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orderpositions/{}/'.format(
+        organizer.slug, event.slug, posid
+    ))
+    assert resp.status_code == 200
+    assert not resp.data.get('pdf_data')

@@ -33,12 +33,13 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
 
+import calendar
 import sys
 import uuid
 from collections import Counter, OrderedDict
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, DecimalException
-from typing import Tuple
+from typing import Optional, Tuple
 
 import dateutil.parser
 import pytz
@@ -62,6 +63,7 @@ from pretix.base.models.base import LoggedModel
 from pretix.base.models.fields import MultiStringField
 from pretix.base.models.tax import TaxedPrice
 
+from ...helpers.images import ImageSizeValidator
 from .event import Event, SubEvent
 
 
@@ -162,7 +164,7 @@ class SubEventItem(models.Model):
     """
     subevent = models.ForeignKey('SubEvent', on_delete=models.CASCADE)
     item = models.ForeignKey('Item', on_delete=models.CASCADE)
-    price = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
+    price = models.DecimalField(max_digits=13, decimal_places=2, null=True, blank=True)
     disabled = models.BooleanField(default=False, verbose_name=_('Disable product for this date'))
     available_from = models.DateTimeField(
         verbose_name=_("Available from"),
@@ -218,7 +220,7 @@ class SubEventItemVariation(models.Model):
     """
     subevent = models.ForeignKey('SubEvent', on_delete=models.CASCADE)
     variation = models.ForeignKey('ItemVariation', on_delete=models.CASCADE)
-    price = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
+    price = models.DecimalField(max_digits=13, decimal_places=2, null=True, blank=True)
     disabled = models.BooleanField(default=False, verbose_name=_('Disable product for this date'))
     available_from = models.DateTimeField(
         verbose_name=_("Available from"),
@@ -310,6 +312,8 @@ class Item(LoggedModel):
     :type tax_rate: decimal.Decimal
     :param admission: ``True``, if this item allows persons to enter the event (as opposed to e.g. merchandise)
     :type admission: bool
+    :param personalized: ``True``, if attendee information should be collected for this ticket
+    :type personalized: bool
     :param picture: A product picture to be shown next to the product description
     :type picture: File
     :param available_from: The date this product goes on sale
@@ -336,7 +340,33 @@ class Item(LoggedModel):
     :type sales_channels: bool
     :param issue_giftcard: If ``True``, buying this product will give you a gift card with the value of the product's price
     :type issue_giftcard: bool
+    :param validity_mode: Instruction how to set ``valid_from``/``valid_until`` on tickets, ``null`` is default event validity.
+    :type validity_mode: str
+    :param validity_fixed_from: Start of validity if ``validity_mode`` is ``"fixed"``.
+    :type validity_fixed_from: datetime
+    :param validity_fixed_until: End of validity if ``validity_mode`` is ``"fixed"``.
+    :type validity_fixed_until: datetime
+    :param validity_dynamic_duration_minutes: Number of minutes if ``validity_mode`` is ``"dnyamic"``.
+    :type validity_dynamic_duration_minutes: int
+    :param validity_dynamic_duration_hours: Number of hours if ``validity_mode`` is ``"dnyamic"``.
+    :type validity_dynamic_duration_hours: int
+    :param validity_dynamic_duration_days: Number of days if ``validity_mode`` is ``"dnyamic"``.
+    :type validity_dynamic_duration_days: int
+    :param validity_dynamic_duration_months: Number of months if ``validity_mode`` is ``"dnyamic"``.
+    :type validity_dynamic_duration_months: int
+    :param validity_dynamic_start_choice: Whether customers can choose the start date if ``validity_mode`` is ``"dnyamic"``.
+    :type validity_dynamic_start_choice: bool
+    :param validity_dynamic_start_choice_day_limit: Start date may be maximum this many days in the future if ``validity_mode`` is ``"dnyamic"``.
+    :type validity_dynamic_start_choice_day_limnit: int
+
     """
+    VALIDITY_MODE_FIXED = 'fixed'
+    VALIDITY_MODE_DYNAMIC = 'dynamic'
+    VALIDITY_MODES = (
+        (None, _('Event validity (default)')),
+        (VALIDITY_MODE_FIXED, _('Fixed time frame')),
+        (VALIDITY_MODE_DYNAMIC, _('Dynamic validity')),
+    )
 
     objects = ItemQuerySetManager()
 
@@ -377,7 +407,7 @@ class Item(LoggedModel):
         help_text=_("If this product has multiple variations, you can set different prices for each of the "
                     "variations. If a variation does not have a special price or if you do not have variations, "
                     "this price will be used."),
-        max_digits=7, decimal_places=2, null=True
+        max_digits=13, decimal_places=2, null=True
     )
     free_price = models.BooleanField(
         default=False,
@@ -396,8 +426,14 @@ class Item(LoggedModel):
     admission = models.BooleanField(
         verbose_name=_("Is an admission ticket"),
         help_text=_(
-            'Whether or not buying this product allows a person to enter '
-            'your event'
+            'Whether or not buying this product allows a person to enter your event'
+        ),
+        default=False
+    )
+    personalized = models.BooleanField(
+        verbose_name=_("Is a personalized ticket"),
+        help_text=_(
+            'Whether or not buying this product allows to enter attendee information'
         ),
         default=False
     )
@@ -421,7 +457,8 @@ class Item(LoggedModel):
     picture = models.ImageField(
         verbose_name=_("Product picture"),
         null=True, blank=True, max_length=255,
-        upload_to=itempicture_upload_to
+        upload_to=itempicture_upload_to,
+        validators=[ImageSizeValidator()]
     )
     available_from = models.DateTimeField(
         verbose_name=_("Available from"),
@@ -501,7 +538,7 @@ class Item(LoggedModel):
     original_price = models.DecimalField(
         verbose_name=_('Original price'),
         blank=True, null=True,
-        max_digits=7, decimal_places=2,
+        max_digits=13, decimal_places=2,
         help_text=_('If set, this will be displayed next to the current price to show that the current price is a '
                     'discounted one. This is just a cosmetic setting and will not actually impact pricing.')
     )
@@ -550,6 +587,49 @@ class Item(LoggedModel):
         verbose_name=_('Membership duration in months'),
         default=0,
     )
+
+    validity_mode = models.CharField(
+        choices=VALIDITY_MODES,
+        null=True, blank=True, max_length=16,
+        verbose_name=_('Validity'),
+        help_text=_(
+            'When setting up a regular event, or an event series with time slots, you typically to NOT need to change '
+            'this value. The default setting means that the validity time of tickets will not be decided by the '
+            'product, but by the event and check-in configuration. Only use the other options if you need them to '
+            'realize e.g. a booking of a year-long ticket with a dynamic start date. Note that the validity will be '
+            'stored with the ticket, so if you change the settings here later, existing tickets will not be affected '
+            'by the change but keep their current validity.'
+        )
+    )
+    validity_fixed_from = models.DateTimeField(null=True, blank=True, verbose_name=_('Start of validity'))
+    validity_fixed_until = models.DateTimeField(null=True, blank=True, verbose_name=_('End of validity'))
+    validity_dynamic_duration_minutes = models.PositiveIntegerField(
+        blank=True, null=True,
+        verbose_name=_('Minutes'),
+    )
+    validity_dynamic_duration_hours = models.PositiveIntegerField(
+        blank=True, null=True,
+        verbose_name=_('Hours')
+    )
+    validity_dynamic_duration_days = models.PositiveIntegerField(
+        blank=True, null=True,
+        verbose_name=_('Days'),
+    )
+    validity_dynamic_duration_months = models.PositiveIntegerField(
+        blank=True, null=True,
+        verbose_name=_('Months'),
+    )
+    validity_dynamic_start_choice = models.BooleanField(
+        verbose_name=_('Customers can select the validity start date'),
+        help_text=_('If not selected, the validity always starts at the time of purchase.'),
+        default=False
+    )
+    validity_dynamic_start_choice_day_limit = models.PositiveIntegerField(
+        blank=True, null=True,
+        verbose_name=_('Maximum future start'),
+        help_text=_('The selected start date may only be this many days in the future.')
+    )
+
     # !!! Attention: If you add new fields here, also add them to the copying code in
     # pretix/control/forms/item.py if applicable.
 
@@ -578,21 +658,22 @@ class Item(LoggedModel):
             return self.event.settings.show_quota_left
         return self.show_quota_left
 
+    @property
+    def ask_attendee_data(self):
+        return self.admission and self.personalized
+
     def tax(self, price=None, base_price_is='auto', currency=None, invoice_address=None, override_tax_rate=None, include_bundled=False):
         price = price if price is not None else self.default_price
 
-        if not self.tax_rule:
-            t = TaxedPrice(gross=price, net=price, tax=Decimal('0.00'),
-                           rate=Decimal('0.00'), name='')
-        else:
-            t = self.tax_rule.tax(price, base_price_is=base_price_is, invoice_address=invoice_address,
-                                  override_tax_rate=override_tax_rate, currency=currency or self.event.currency)
-
+        bundled_sum = Decimal('0.00')
+        bundled_sum_net = Decimal('0.00')
+        bundled_sum_tax = Decimal('0.00')
         if include_bundled:
             for b in self.bundles.all():
                 if b.designated_price and b.bundled_item.tax_rule_id != self.tax_rule_id:
                     if b.bundled_variation:
-                        bprice = b.bundled_variation.tax(b.designated_price * b.count, base_price_is='gross',
+                        bprice = b.bundled_variation.tax(b.designated_price * b.count,
+                                                         base_price_is='gross',
                                                          invoice_address=invoice_address,
                                                          currency=currency)
                     else:
@@ -600,13 +681,23 @@ class Item(LoggedModel):
                                                     invoice_address=invoice_address,
                                                     base_price_is='gross',
                                                     currency=currency)
-                    compare_price = self.tax_rule.tax(b.designated_price * b.count,
-                                                      override_tax_rate=override_tax_rate,
-                                                      invoice_address=invoice_address,
-                                                      currency=currency)
-                    t.net += bprice.net - compare_price.net
-                    t.tax += bprice.tax - compare_price.tax
-                    t.name = "MIXED!"
+                    bundled_sum += bprice.gross
+                    bundled_sum_net += bprice.net
+                    bundled_sum_tax += bprice.tax
+
+        if not self.tax_rule:
+            t = TaxedPrice(gross=price - bundled_sum, net=price - bundled_sum, tax=Decimal('0.00'),
+                           rate=Decimal('0.00'), name='')
+        else:
+            t = self.tax_rule.tax(price, base_price_is=base_price_is, invoice_address=invoice_address,
+                                  override_tax_rate=override_tax_rate, currency=currency or self.event.currency,
+                                  subtract_from_gross=bundled_sum)
+
+        if bundled_sum:
+            t.name = "MIXED!"
+            t.gross += bundled_sum
+            t.net += bundled_sum_net
+            t.tax += bundled_sum_tax
 
         return t
 
@@ -743,6 +834,73 @@ class Item(LoggedModel):
 
         return OrderedDict((k, v) for k, v in sorted(data.items(), key=lambda k: k[0]))
 
+    def compute_validity(
+        self, *, requested_start: datetime, override_tz=None, enforce_start_limit=False
+    ) -> Tuple[Optional[datetime], Optional[datetime]]:
+        if self.validity_mode == Item.VALIDITY_MODE_FIXED:
+            return self.validity_fixed_from, self.validity_fixed_until
+        elif self.validity_mode == Item.VALIDITY_MODE_DYNAMIC:
+            tz = override_tz or self.event.timezone
+            requested_start = requested_start or now()
+            if enforce_start_limit and not self.validity_dynamic_start_choice:
+                requested_start = now()
+            if enforce_start_limit and self.validity_dynamic_start_choice_day_limit is not None:
+                requested_start = min(requested_start, now() + timedelta(days=self.validity_dynamic_start_choice_day_limit))
+
+            valid_until = requested_start.astimezone(tz)
+
+            if self.validity_dynamic_duration_months:
+                valid_until -= timedelta(days=1)
+
+                replace_day = valid_until.day
+                max_day_start_month = calendar.monthrange(valid_until.year, valid_until.month)[1]
+                if replace_day == max_day_start_month:
+                    # This is a correction for month passes that start e.g. on March 1st – their previous day should
+                    # be "last of previous month", not "28th of previous month".
+                    replace_day = 31
+
+                replace_year = valid_until.year
+                replace_month = valid_until.month + self.validity_dynamic_duration_months
+
+                while replace_month > 12:
+                    replace_month -= 12
+                    replace_year += 1
+                max_day = calendar.monthrange(replace_year, replace_month)[1]
+                replace_date = date(
+                    year=replace_year,
+                    month=replace_month,
+                    day=min(replace_day, max_day),
+                )
+                if self.validity_dynamic_duration_days:
+                    replace_date += timedelta(days=self.validity_dynamic_duration_days)
+                valid_until = tz.localize(valid_until.replace(
+                    year=replace_date.year,
+                    month=replace_date.month,
+                    day=replace_date.day,
+                    hour=23, minute=59, second=59, microsecond=0,
+                    tzinfo=None,
+                ))
+            elif self.validity_dynamic_duration_days:
+                replace_date = valid_until.date() + timedelta(days=self.validity_dynamic_duration_days - 1)
+                valid_until = tz.localize(valid_until.replace(
+                    year=replace_date.year,
+                    month=replace_date.month,
+                    day=replace_date.day,
+                    hour=23, minute=59, second=59, microsecond=0,
+                    tzinfo=None
+                ))
+
+            if self.validity_dynamic_duration_hours:
+                valid_until += timedelta(hours=self.validity_dynamic_duration_hours)
+
+            if self.validity_dynamic_duration_minutes:
+                valid_until += timedelta(minutes=self.validity_dynamic_duration_minutes)
+
+            return requested_start, valid_until
+
+        else:
+            return None, None
+
 
 def _all_sales_channels_identifiers():
     from pretix.base.channels import get_all_sales_channels
@@ -769,6 +927,7 @@ class ItemVariation(models.Model):
     :param require_approval: If set to ``True``, orders containing this variation can only be processed and paid after
     approval by an administrator
     :type require_approval: bool
+
     """
     item = models.ForeignKey(
         Item,
@@ -793,14 +952,14 @@ class ItemVariation(models.Model):
         verbose_name=_("Position")
     )
     default_price = models.DecimalField(
-        decimal_places=2, max_digits=7,
+        decimal_places=2, max_digits=13,
         null=True, blank=True,
         verbose_name=_("Default price"),
     )
     original_price = models.DecimalField(
         verbose_name=_('Original price'),
         blank=True, null=True,
-        max_digits=7, decimal_places=2,
+        max_digits=13, decimal_places=2,
         help_text=_('If set, this will be displayed next to the current price to show that the current price is a '
                     'discounted one. This is just a cosmetic setting and will not actually impact pricing.')
     )
@@ -848,6 +1007,13 @@ class ItemVariation(models.Model):
         default=False,
         help_text=_('This variation will be hidden from the event page until the user enters a voucher '
                     'that unlocks this variation.')
+    )
+    checkin_attention = models.BooleanField(
+        verbose_name=_('Requires special attention'),
+        default=False,
+        help_text=_('If you set this, the check-in app will show a visible warning that this ticket requires special '
+                    'attention. You can use this for example for student tickets to indicate to the person at '
+                    'check-in that the student ID card still needs to be checked.')
     )
 
     objects = ScopedManager(organizer='item__event__organizer')
@@ -1001,6 +1167,16 @@ class ItemVariation(models.Model):
             return False
         return True
 
+    @property
+    def meta_data(self):
+        data = self.item.meta_data
+        if hasattr(self, 'meta_values_cached'):
+            data.update({v.property.name: v.value for v in self.meta_values_cached})
+        else:
+            data.update({v.property.name: v.value for v in self.meta_values.select_related('property').all()})
+
+        return OrderedDict((k, v) for k, v in sorted(data.items(), key=lambda k: k[0]))
+
 
 class ItemAddOn(models.Model):
     """
@@ -1128,7 +1304,7 @@ class ItemBundle(models.Model):
     )
     designated_price = models.DecimalField(
         default=Decimal('0.00'), blank=True,
-        decimal_places=2, max_digits=10,
+        decimal_places=2, max_digits=13,
         verbose_name=_('Designated price part'),
         help_text=_('If set, it will be shown that this bundled item is responsible for the given value of the total '
                     'gross price. This might be important in cases of mixed taxation, but can be kept blank otherwise. This '
@@ -1243,7 +1419,13 @@ class Question(LoggedModel):
         max_length=190,
         verbose_name=_("Internal identifier"),
         help_text=_('You can enter any value here to make it easier to match the data with other sources. If you do '
-                    'not input one, we will generate one automatically.')
+                    'not input one, we will generate one automatically.'),
+        validators=[
+            RegexValidator(
+                regex=r"^[a-zA-Z0-9.\-_]+$",
+                message=_("The identifier may only contain letters, numbers, dots, dashes, and underscores."),
+            ),
+        ],
     )
     help_text = I18nTextField(
         verbose_name=_("Help text"),
@@ -1319,6 +1501,7 @@ class Question(LoggedModel):
         verbose_name = _("Question")
         verbose_name_plural = _("Questions")
         ordering = ('position', 'id')
+        unique_together = (('event', 'identifier'),)
 
     def __str__(self):
         return str(self.question)
@@ -1334,7 +1517,7 @@ class Question(LoggedModel):
     @staticmethod
     def _clean_identifier(event, code, instance=None):
         qs = Question.objects.filter(event=event, identifier__iexact=code)
-        if instance:
+        if instance and instance.pk:
             qs = qs.exclude(pk=instance.pk)
         if qs.exists():
             raise ValidationError(_('This identifier is already used for a different question.'))
@@ -1370,8 +1553,10 @@ class Question(LoggedModel):
         if self.type == Question.TYPE_CHOICE:
             if isinstance(answer, QuestionOption):
                 return answer
+            if not isinstance(answer, (int, str)):
+                raise ValidationError(_('Invalid input type.'))
             q = Q(identifier=answer)
-            if isinstance(answer, int) or answer.isdigit():
+            if isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
                 q |= Q(pk=answer)
             o = self.options.filter(q).first()
             if not o:
@@ -1461,7 +1646,17 @@ class Question(LoggedModel):
 
 class QuestionOption(models.Model):
     question = models.ForeignKey('Question', related_name='options', on_delete=models.CASCADE)
-    identifier = models.CharField(max_length=190)
+    identifier = models.CharField(
+        max_length=190,
+        help_text=_('You can enter any value here to make it easier to match the data with other sources. If you do '
+                    'not input one, we will generate one automatically.'),
+        validators=[
+            RegexValidator(
+                regex=r"^[a-zA-Z0-9.\-_]+$",
+                message=_("The identifier may only contain letters, numbers, dots, dashes, and underscores."),
+            ),
+        ],
+    )
     answer = I18nCharField(verbose_name=_('Answer'))
     position = models.IntegerField(default=0)
 
@@ -1742,6 +1937,9 @@ class ItemMetaProperty(LoggedModel):
     )
     default = models.TextField(blank=True)
 
+    class Meta:
+        ordering = ("name",)
+
 
 class ItemMetaValue(LoggedModel):
     """
@@ -1761,8 +1959,21 @@ class ItemMetaValue(LoggedModel):
     class Meta:
         unique_together = ('item', 'property')
 
-    def delete(self, *args, **kwargs):
-        super().delete(*args, **kwargs)
 
-    def save(self, *args, **kwargs):
-        super().save(*args, **kwargs)
+class ItemVariationMetaValue(LoggedModel):
+    """
+    A meta-data value assigned to an item variation, overriding the value on the item.
+
+    :param variation: The variation this metadata is valid for
+    :type variation: ItemVariation
+    :param property: The property this value belongs to
+    :type property: ItemMetaProperty
+    :param value: The actual value
+    :type value: str
+    """
+    variation = models.ForeignKey('ItemVariation', on_delete=models.CASCADE, related_name='meta_values')
+    property = models.ForeignKey('ItemMetaProperty', on_delete=models.CASCADE, related_name='variation_values')
+    value = models.TextField()
+
+    class Meta:
+        unique_together = ('variation', 'property')

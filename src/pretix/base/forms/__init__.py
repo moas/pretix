@@ -36,11 +36,13 @@ import logging
 
 import i18nfield.forms
 from django import forms
+from django.core.validators import URLValidator
 from django.forms.models import ModelFormMetaclass
 from django.utils.crypto import get_random_string
 from django.utils.translation import gettext_lazy as _
 from formtools.wizard.views import SessionWizardView
 from hierarkey.forms import HierarkeyForm
+from i18nfield.strings import LazyI18nString
 
 from pretix.base.reldate import RelativeDateField, RelativeDateTimeField
 
@@ -196,10 +198,16 @@ class SecretKeySettingsWidget(forms.TextInput):
         attrs.update({
             'autocomplete': 'new-password'  # see https://bugs.chromium.org/p/chromium/issues/detail?id=370363#c7
         })
+        self.__reflect_value = False
         super().__init__(attrs)
 
+    def value_from_datadict(self, data, files, name):
+        value = super().value_from_datadict(data, files, name)
+        self.__reflect_value = value and value != SECRET_REDACTED
+        return value
+
     def get_context(self, name, value, attrs):
-        if value:
+        if value and not self.__reflect_value:
             value = SECRET_REDACTED
         return super().get_context(name, value, attrs)
 
@@ -216,3 +224,17 @@ class SecretKeySettingsField(forms.CharField):
         if value == SECRET_REDACTED:
             return
         return super().run_validators(value)
+
+
+class I18nURLFormField(i18nfield.forms.I18nFormField):
+    def clean(self, value) -> LazyI18nString:
+        value = super().clean(value)
+        if not value:
+            return value
+        if isinstance(value.data, dict):
+            for v in value.data.values():
+                if v:
+                    URLValidator()(v)
+        else:
+            URLValidator()(value.data)
+        return value

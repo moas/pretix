@@ -56,7 +56,6 @@ from django.utils.translation import gettext, gettext_lazy as _
 from django.views.decorators.http import require_http_methods
 from django.views.generic import ListView
 from django.views.generic.detail import DetailView, SingleObjectMixin
-from django.views.generic.edit import DeleteView
 from django_countries.fields import Country
 
 from pretix.api.serializers.item import (
@@ -85,6 +84,7 @@ from pretix.control.signals import item_forms, item_formsets
 from pretix.helpers.models import modelcopy
 
 from ...base.channels import get_all_sales_channels
+from ...helpers.compat import CompatDeleteView
 from . import ChartContainingView, CreateView, PaginationMixin, UpdateView
 
 
@@ -189,9 +189,8 @@ def reorder_items(request, organizer, event):
     return HttpResponse()
 
 
-class CategoryDelete(EventPermissionRequiredMixin, DeleteView):
+class CategoryDelete(EventPermissionRequiredMixin, CompatDeleteView):
     model = ItemCategory
-    form_class = CategoryForm
     template_name = 'pretixcontrol/items/category_delete.html'
     permission = 'can_change_items'
     context_object_name = 'category'
@@ -523,7 +522,7 @@ def reorder_questions(request, organizer, event):
     return HttpResponse()
 
 
-class QuestionDelete(EventPermissionRequiredMixin, DeleteView):
+class QuestionDelete(EventPermissionRequiredMixin, CompatDeleteView):
     model = Question
     template_name = 'pretixcontrol/items/question_delete.html'
     permission = 'can_change_items'
@@ -630,6 +629,11 @@ class QuestionView(EventPermissionRequiredMixin, QuestionMixin, ChartContainingV
                                orderposition__order__expires__lt=now().replace(hour=0, minute=0, second=0))
             elif s == 'np':
                 qs = qs.filter(orderposition__order__status__in=[Order.STATUS_PENDING, Order.STATUS_PAID])
+            elif s == 'pv':
+                qs = qs.filter(
+                    Q(orderposition__order__status=Order.STATUS_PAID) |
+                    Q(orderposition__order__status=Order.STATUS_PENDING, orderposition__order__valid_if_pending=True)
+                )
             elif s == 'ne':
                 qs = qs.filter(orderposition__order__status__in=[Order.STATUS_PENDING, Order.STATUS_EXPIRED])
             else:
@@ -812,16 +816,18 @@ class QuotaList(PaginationMixin, ListView):
             qs = qs.filter(subevent_id=s)
 
         valid_orders = {
-            '-date': ('-subevent__date_from', 'name'),
-            'date': ('subevent__date_from', '-name'),
-            'size': ('size', 'name'),
-            '-size': ('-size', '-name'),
-            'name': ('name',),
-            '-name': ('-name',),
+            '-date': ('-subevent__date_from', 'name', 'pk'),
+            'date': ('subevent__date_from', '-name', '-pk'),
+            'size': ('size', 'name', 'pk'),
+            '-size': ('-size', '-name', '-pk'),
+            'name': ('name', 'pk'),
+            '-name': ('-name', '-pk'),
         }
 
         if self.request.GET.get("ordering", "-date") in valid_orders:
             qs = qs.order_by(*valid_orders[self.request.GET.get("ordering", "-date")])
+        else:
+            qs = qs.order_by('name', 'subevent__date_from', 'pk')
 
         return qs
 
@@ -1090,7 +1096,7 @@ class QuotaUpdate(EventPermissionRequiredMixin, UpdateView):
         return super().form_invalid(form)
 
 
-class QuotaDelete(EventPermissionRequiredMixin, DeleteView):
+class QuotaDelete(EventPermissionRequiredMixin, CompatDeleteView):
     model = Quota
     template_name = 'pretixcontrol/items/quota_delete.html'
     permission = 'can_change_items'
@@ -1204,7 +1210,7 @@ class ItemCreate(EventPermissionRequiredMixin, CreateView):
             initial['tax_rule'] = trs[0]
 
         if self.copy_from:
-            fields = ('name', 'internal_name', 'category', 'admission', 'default_price', 'tax_rule')
+            fields = ('name', 'internal_name', 'category', 'admission', 'personalized', 'default_price', 'tax_rule')
             for f in fields:
                 initial[f] = getattr(self.copy_from, f)
             initial['copy_from'] = self.copy_from
@@ -1344,22 +1350,36 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, MetaDataE
     def form_valid(self, form):
         self.save_meta()
         messages.success(self.request, _('Your changes have been saved.'))
-        if form.has_changed() or any(f.has_changed() for f in self.plugin_forms):
-            data = {
-                k: form.cleaned_data.get(k)
-                for k in form.changed_data
-            }
-            for f in self.plugin_forms:
-                data.update({
-                    k: (f.cleaned_data.get(k).name
-                        if isinstance(f.cleaned_data.get(k), File)
-                        else f.cleaned_data.get(k))
-                    for k in f.changed_data
-                })
+
+        change_data = {
+            k: form.cleaned_data.get(k)
+            for k in form.changed_data
+        }
+        for f in self.plugin_forms:
+            change_data.update({
+                k: (f.cleaned_data.get(k).name
+                    if isinstance(f.cleaned_data.get(k), File)
+                    else f.cleaned_data.get(k))
+                for k in f.changed_data
+            })
+
+        meta_changed = {}
+        for f in self.meta_forms:
+            meta_changed.update({
+                k: (f.cleaned_data.get(k).name
+                    if isinstance(f.cleaned_data.get(k), File)
+                    else f.cleaned_data.get(k))
+                for k in f.changed_data
+            })
+        if meta_changed:
+            change_data['meta_data'] = meta_changed
+
+        if change_data:
             self.object.log_action(
-                'pretix.event.item.changed', user=self.request.user, data=data
+                'pretix.event.item.changed', user=self.request.user, data=change_data
             )
             invalidate_cache.apply_async(kwargs={'event': self.request.event.pk, 'item': self.object.pk})
+
         for f in self.plugin_forms:
             f.save()
 
@@ -1412,7 +1432,7 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, MetaDataE
                 can_order=True, can_delete=True, extra=0
             )(
                 self.request.POST if self.request.method == "POST" else None,
-                queryset=ItemVariation.objects.filter(item=self.get_object()),
+                queryset=ItemVariation.objects.filter(item=self.get_object()).prefetch_related('meta_values', 'require_membership_types'),
                 event=self.request.event, prefix="variations"
             )),
             ('addons', inlineformset_factory(
@@ -1450,7 +1470,7 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, MetaDataE
         return f
 
 
-class ItemDelete(EventPermissionRequiredMixin, DeleteView):
+class ItemDelete(EventPermissionRequiredMixin, CompatDeleteView):
     model = Item
     template_name = 'pretixcontrol/item/delete.html'
     permission = 'can_change_items'

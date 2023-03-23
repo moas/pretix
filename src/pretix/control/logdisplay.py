@@ -52,7 +52,7 @@ from pretix.base.models import (
     Checkin, CheckinList, Event, ItemVariation, LogEntry, OrderPosition,
     TaxRule,
 )
-from pretix.base.signals import logentry_display
+from pretix.base.signals import logentry_display, orderposition_blocked_display
 from pretix.base.templatetags.money import money_filter
 
 OVERVIEW_BANLIST = [
@@ -160,6 +160,25 @@ def _display_order_changed(event: Event, logentry: LogEntry):
             )
     elif logentry.action_type == 'pretix.event.order.changed.secret':
         return text + ' ' + _('A new secret has been generated for position #{posid}.').format(
+            posid=data.get('positionid', '?'),
+        )
+    elif logentry.action_type == 'pretix.event.order.changed.valid_from':
+        return text + ' ' + _('The validity start date for position #{posid} has been changed to {value}.').format(
+            posid=data.get('positionid', '?'),
+            value=date_format(dateutil.parser.parse(data.get('new_value')), 'SHORT_DATETIME_FORMAT') if data.get(
+                'new_value') else '–'
+        )
+    elif logentry.action_type == 'pretix.event.order.changed.valid_until':
+        return text + ' ' + _('The validity end date for position #{posid} has been changed to {value}.').format(
+            posid=data.get('positionid', '?'),
+            value=date_format(dateutil.parser.parse(data.get('new_value')), 'SHORT_DATETIME_FORMAT') if data.get('new_value') else '–'
+        )
+    elif logentry.action_type == 'pretix.event.order.changed.add_block':
+        return text + ' ' + _('A block has been added for position #{posid}.').format(
+            posid=data.get('positionid', '?'),
+        )
+    elif logentry.action_type == 'pretix.event.order.changed.remove_block':
+        return text + ' ' + _('A block has been removed for position #{posid}.').format(
             posid=data.get('positionid', '?'),
         )
     elif logentry.action_type == 'pretix.event.order.changed.split':
@@ -314,10 +333,24 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.object.cloned': _('This object has been created by cloning.'),
         'pretix.organizer.changed': _('The organizer has been changed.'),
         'pretix.organizer.settings': _('The organizer settings have been changed.'),
+        'pretix.organizer.footerlinks.changed': _('The footer links have been changed.'),
+        'pretix.organizer.export.schedule.added': _('A scheduled export has been added.'),
+        'pretix.organizer.export.schedule.changed': _('A scheduled export has been changed.'),
+        'pretix.organizer.export.schedule.deleted': _('A scheduled export has been deleted.'),
+        'pretix.organizer.export.schedule.executed': _('A scheduled export has been executed.'),
+        'pretix.organizer.export.schedule.failed': _('A scheduled export has failed: {reason}.'),
         'pretix.giftcards.acceptance.added': _('Gift card acceptance for another organizer has been added.'),
         'pretix.giftcards.acceptance.removed': _('Gift card acceptance for another organizer has been removed.'),
         'pretix.webhook.created': _('The webhook has been created.'),
         'pretix.webhook.changed': _('The webhook has been changed.'),
+        'pretix.webhook.retries.expedited': _('The webhook call retry jobs have been manually expedited.'),
+        'pretix.webhook.retries.dropped': _('The webhook call retry jobs have been dropped.'),
+        'pretix.ssoprovider.created': _('The SSO provider has been created.'),
+        'pretix.ssoprovider.changed': _('The SSO provider has been changed.'),
+        'pretix.ssoprovider.deleted': _('The SSO provider has been deleted.'),
+        'pretix.ssoclient.created': _('The SSO client has been created.'),
+        'pretix.ssoclient.changed': _('The SSO client has been changed.'),
+        'pretix.ssoclient.deleted': _('The SSO client has been deleted.'),
         'pretix.membershiptype.created': _('The membership type has been created.'),
         'pretix.membershiptype.changed': _('The membership type has been changed.'),
         'pretix.membershiptype.deleted': _('The membership type has been deleted.'),
@@ -337,6 +370,8 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.event.order.unpaid': _('The order has been marked as unpaid.'),
         'pretix.event.order.secret.changed': _('The order\'s secret has been changed.'),
         'pretix.event.order.expirychanged': _('The order\'s expiry date has been changed.'),
+        'pretix.event.order.valid_if_pending.set': _('The order has been set to be usable before it is paid.'),
+        'pretix.event.order.valid_if_pending.unset': _('The order has been set to require payment before use.'),
         'pretix.event.order.expired': _('The order has been marked as expired.'),
         'pretix.event.order.paid': _('The order has been marked as paid.'),
         'pretix.event.order.cancellationrequest.deleted': _('The cancellation request has been deleted.'),
@@ -362,10 +397,12 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.event.order.custom_followup_at': _('The order\'s follow-up date has been updated.'),
         'pretix.event.order.checkin_attention': _('The order\'s flag to require attention at check-in has been '
                                                   'toggled.'),
+        'pretix.event.order.pretix.event.order.valid_if_pending': _('The order\'s flag to be considered valid even if '
+                                                                    'unpaid has been toggled.'),
         'pretix.event.order.payment.changed': _('A new payment {local_id} has been started instead of the previous one.'),
         'pretix.event.order.email.sent': _('An unidentified type email has been sent.'),
         'pretix.event.order.email.error': _('Sending of an email has failed.'),
-        'pretix.event.order.email.attachments.skipped': _('The email has been sent without attachments since they '
+        'pretix.event.order.email.attachments.skipped': _('The email has been sent without attached tickets since they '
                                                           'would have been too large to be likely to arrive.'),
         'pretix.event.order.email.custom_sent': _('A custom email has been sent.'),
         'pretix.event.order.position.email.custom_sent': _('A custom email has been sent to an attendee.'),
@@ -400,6 +437,11 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.event.order.refund.done': _('Refund {local_id} has been completed.'),
         'pretix.event.order.refund.canceled': _('Refund {local_id} has been canceled.'),
         'pretix.event.order.refund.failed': _('Refund {local_id} has failed.'),
+        'pretix.event.export.schedule.added': _('A scheduled export has been added.'),
+        'pretix.event.export.schedule.changed': _('A scheduled export has been changed.'),
+        'pretix.event.export.schedule.deleted': _('A scheduled export has been deleted.'),
+        'pretix.event.export.schedule.executed': _('A scheduled export has been executed.'),
+        'pretix.event.export.schedule.failed': _('A scheduled export has failed: {reason}.'),
         'pretix.control.auth.user.created': _('The user has been created.'),
         'pretix.user.settings.2fa.enabled': _('Two-factor authentication has been enabled.'),
         'pretix.user.settings.2fa.disabled': _('Two-factor authentication has been disabled.'),
@@ -468,6 +510,7 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.event.testmode.deactivated': _('The test mode has been disabled.'),
         'pretix.event.added': _('The event has been created.'),
         'pretix.event.changed': _('The event details have been changed.'),
+        'pretix.event.footerlinks.changed': _('The footer links have been changed.'),
         'pretix.event.question.option.added': _('An answer option has been added to the question.'),
         'pretix.event.question.option.deleted': _('An answer option has been removed from the question.'),
         'pretix.event.question.option.changed': _('An answer option has been changed.'),
@@ -477,6 +520,7 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.event.permissions.deleted': _('A user has been removed from the event team.'),
         'pretix.waitinglist.voucher': _('A voucher has been sent to a person on the waiting list.'),
         'pretix.event.orders.waitinglist.deleted': _('An entry has been removed from the waiting list.'),
+        'pretix.event.orders.waitinglist.transferred': _('An entry has been transferred to another waiting list.'),
         'pretix.event.orders.waitinglist.changed': _('An entry has been changed on the waiting list.'),
         'pretix.event.orders.waitinglist.added': _('An entry has been added to the waiting list.'),
         'pretix.team.created': _('The team has been created.'),
@@ -626,3 +670,11 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
 
     if logentry.action_type == 'pretix.control.auth.user.impersonate_stopped':
         return str(_('You stopped impersonating {}.')).format(data['other_email'])
+
+
+@receiver(signal=orderposition_blocked_display, dispatch_uid="pretixcontrol_orderposition_blocked_display")
+def pretixcontrol_orderposition_blocked_display(sender: Event, orderposition, block_name, **kwargs):
+    if block_name == 'admin':
+        return _('Blocked manually')
+    elif block_name.startswith('api:'):
+        return _('Blocked because of an API integration')

@@ -36,10 +36,6 @@ available_number                      integer                    Number of avail
                                                                  slightly out of date. ``null`` means unlimited.
 ===================================== ========================== =======================================================
 
-.. versionchanged:: 3.10
-
-   The attribute ``release_after_exit`` has been added.
-
 .. versionchanged:: 4.1
 
     The ``with_availability`` query parameter has been added.
@@ -89,7 +85,8 @@ Endpoints
    :query integer page: The page number in case of a multi-page result set, default is 1
    :query string ordering: Manually set the ordering of results. Valid fields to be used are ``id`` and ``position``.
                            Default: ``position``
-   :query integer subevent: Only return quotas of the sub-event with the given ID
+   :query integer subevent: Only return quotas of the sub-event with the given ID.
+   :query integer subevent__in: Only return quotas of sub-events with one the given IDs (comma-separated).
    :query string with_availability: Set to ``true`` to get availability information. Can lead to increased answer times.
    :param organizer: The ``slug`` field of the organizer to fetch
    :param event: The ``slug`` field of the event to fetch

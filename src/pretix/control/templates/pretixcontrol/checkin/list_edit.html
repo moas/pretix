@@ -48,16 +48,14 @@
                         Make sure to always use the latest version of our scanning apps for these options to work.
                     {% endblocktrans %}
                     <br>
-                    <strong>
-                        {% blocktrans trimmed %}
-                            If you make use of these advanced options, we recommend using our Android and Desktop apps.
-                            Custom check-in rules do not work offline with our iOS scanning app.
-                        {% endblocktrans %}
-                    </strong>
+                    {% blocktrans trimmed %}
+                        If you make use of these advanced options, we recommend using our Android and Desktop apps.
+                    {% endblocktrans %}
                 </div>
 
                 {% bootstrap_field form.allow_multiple_entries layout="control" %}
                 {% bootstrap_field form.allow_entry_after_exit layout="control" %}
+                {% bootstrap_field form.addon_match layout="control" %}
                 {% bootstrap_field form.exit_all_at layout="control" %}
                 {% bootstrap_field form.auto_checkin_sales_channels layout="control" %}
                 {% if form.gates %}
@@ -118,8 +116,12 @@
     </form>
     {{ items|json_script:"items" }}
 
-    {% compress js %}
+    {% if DEBUG %}
         <script type="text/javascript" src="{% static "vuejs/vue.js" %}"></script>
+    {% else %}
+        <script type="text/javascript" src="{% static "vuejs/vue.min.js" %}"></script>
+    {% endif %}
+    {% compress js %}
         <script type="text/javascript" src="{% static "d3/d3.v6.js" %}"></script>
         <script type="text/javascript" src="{% static "d3/d3-color.v2.js" %}"></script>
         <script type="text/javascript" src="{% static "d3/d3-dispatch.v2.js" %}"></script>
@@ -130,6 +132,8 @@
         <script type="text/javascript" src="{% static "d3/d3-transition.v2.js" %}"></script>
         <script type="text/javascript" src="{% static "d3/d3-drag.v2.js" %}"></script>
         <script type="text/javascript" src="{% static "d3/d3-zoom.v2.js" %}"></script>
+    {% endcompress %}
+    {% compress js %}
         <script type="text/javascript" src="{% static "pretixcontrol/js/ui/checkinrules/jsonlogic-boolalg.js" %}"></script>
         <script type="text/vue" src="{% static 'pretixcontrol/js/ui/checkinrules/datetimefield.vue' %}"></script>
         <script type="text/vue" src="{% static 'pretixcontrol/js/ui/checkinrules/timefield.vue' %}"></script>

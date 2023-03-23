@@ -23,6 +23,14 @@ function interpolate(fmt, object, named) {
 }
 
 var form_handlers = function (el) {
+    el.find('input, select, textarea').on('invalid', function (e) {
+        if (!$(this).is(':visible')) {
+            var panel = $(this).closest('.panel');
+            if (!panel.attr('open')) panel.addClass('details-open').attr('open', true).children(':not(summary)').slideDown();
+            if (!$(document.activeElement).is(':invalid')) this.focus();
+        }
+    });
+
     el.find(".datetimepicker").each(function () {
         $(this).datetimepicker({
             format: $("body").attr("data-datetimeformat"),
@@ -174,6 +182,81 @@ var form_handlers = function (el) {
     }
 };
 
+function setup_basics(el) {
+    el.find("input[data-toggle=radiocollapse]").change(function () {
+        $($(this).attr("data-parent")).find(".collapse.in").collapse('hide');
+        $($(this).attr("data-target")).collapse('show');
+    });
+    el.find("input[data-toggle=radiocollapse]:checked").each(function () {
+        if (!$($(this).attr("data-parent")).find(".collapse.in").length) {
+            $($(this).attr("data-target")).collapse('show');
+        }
+    });
+    el.find(".js-only").removeClass("js-only");
+    el.find(".js-hidden").hide();
+
+    el.find("div.collapsed").removeClass("collapsed").addClass("collapse");
+    el.find(".has-error, .alert-danger").each(function () {
+        $(this).closest("div.panel-collapse").collapse("show");
+    });
+    el.find(".has-error").first().each(function(){
+        if ($(this).is(':input')) this.focus();
+        else $(":input", this).get(0).focus();
+    });
+    el.find(".alert-danger").first().each(function() {
+        var container = this;
+        var content = $("<ul></ul>").click(function(e) {
+            var input = $(e.target.hash).get(0);
+            if (input) input.focus();
+            input.scrollIntoView({block: "center"});
+            e.preventDefault();
+        });
+        $(".has-error").each(function() {
+            var target = target = $(":input", this);
+            var desc = target && target.attr("aria-describedby") ? document.getElementById(target.attr("aria-describedby").split(' ', 1)[0]) : null;
+            if (!target || !desc || desc == container) return;
+
+            // multi-input fields have a role=group with aria-labelledby
+            var label = this.hasAttribute("aria-labelledby") ? $("#" + this.getAttribute("aria-labelledby")) : $("[for="+target.attr("id")+"]");
+
+            var $li = $("<li>");
+            $li.text(": " + desc.textContent)
+            $li.prepend($("<a>").attr("href", "#" + target.attr("id")).text(label.get(0).childNodes[0].nodeValue))
+            content.append($li);
+        });
+        $(this).append(content);
+    });
+
+    el.find("[data-click-to-load]").on("click", function(e) {
+        var target = document.getElementById(this.getAttribute("data-click-to-load"));
+        target.src = this.href;
+        target.focus();
+        e.preventDefault();
+    });
+
+    el.find('[data-toggle="tooltip"]').tooltip();
+
+    // AddOns
+    el.find('.addon-variation-description').hide();
+    el.find('.toggle-variation-description').click(function () {
+        $(this).parent().find('.addon-variation-description').slideToggle();
+    });
+    el.find('input[type=radio][description]').change(function () {
+        if ($(this).prop("checked")) {
+            $(this).parent().parent().find('.addon-variation-description').stop().slideDown();
+        }
+    });
+}
+
+function setup_week_calendar() {
+    // Week calendar
+    // On mobile, auto-collapse all days except today, if we have more than 15 events in total
+    if ($(window).width() < 992 && $(".week-calendar .event").length > 15) {
+        $(".week-calendar .weekday:not(.today)").each(function () {
+            $(this).prop("open", false);
+        });
+    }
+}
 
 $(function () {
     "use strict";
@@ -191,48 +274,7 @@ $(function () {
         if (!$input.prop("checked")) $input.prop('checked', true).trigger("change");
     });
 
-    $("input[data-toggle=radiocollapse]").change(function () {
-        $($(this).attr("data-parent")).find(".collapse.in").collapse('hide');
-        $($(this).attr("data-target")).collapse('show');
-    });
-    $(".js-only").removeClass("js-only");
-    $(".js-hidden").hide();
-
-    $("div.collapsed").removeClass("collapsed").addClass("collapse");
-    $(".has-error, .alert-danger").each(function () {
-        $(this).closest("div.panel-collapse").collapse("show");
-    });
-    $(".has-error").first().each(function(){
-        if ($(this).is(':input')) this.focus();
-        else $(":input", this).get(0).focus();
-    });
-    $(".alert-danger").first().each(function() {
-        var content = $("<ul></ul>").click(function(e) {
-            var input = $(e.target.hash).get(0);
-            if (input) input.focus();
-            input.scrollIntoView({block: "center"});
-            e.preventDefault();
-        });
-        $(".has-error").each(function() {
-            var target = target = $(":input", this);
-            var desc = $("#" + target.attr("aria-describedby").split(' ', 1)[0]);
-            // multi-input fields have a role=group with aria-labelledby 
-            var label = this.hasAttribute("aria-labelledby") ? $("#" + this.getAttribute("aria-labelledby")) : $("[for="+target.attr("id")+"]");
-
-            var $li = $("<li>");
-            $li.text(": " + desc.text())
-            $li.prepend($("<a>").attr("href", "#" + target.attr("id")).text(label.get(0).childNodes[0].nodeValue))
-            content.append($li);
-        });
-        $(this).append(content);
-    });
-
-    $("[data-click-to-load]").on("click", function(e) {
-        var target = document.getElementById(this.getAttribute("data-click-to-load"));
-        target.src = this.href;
-        target.focus();
-        e.preventDefault();
-    });
+    setup_basics($("body"));
     $(".overlay-remove").on("click", function() {
         $(this).closest(".contains-overlay").find(".overlay").fadeOut();
     });
@@ -244,33 +286,20 @@ $(function () {
         $("#voucher-toggle").slideUp();
     });
 
-    $('[data-toggle="tooltip"]').tooltip();
-
     $("#ajaxerr").on("click", ".ajaxerr-close", ajaxErrDialog.hide);
-
-    // AddOns
-    $('.addon-variation-description').hide();
-    $('.toggle-variation-description').click(function () {
-        $(this).parent().find('.addon-variation-description').slideToggle();
-    });
-    $('input[type=radio][description]').change(function () {
-        if ($(this).prop("checked")) {
-            $(this).parent().parent().find('.addon-variation-description').stop().slideDown();
-        }
-    });
 
     // Copy answers
     $(".js-copy-answers").click(function (e) {
         e.preventDefault();
         e.stopPropagation();
-        let idx = $(this).data('id');
-        const addonDivs = $('div[data-idx="' + idx +'"]')
+        var idx = $(this).data('id');
+        var addonDivs = $('div[data-idx="' + idx +'"]');
         addonDivs.each(function (index) {
-            const elements = $(this).find('input, select, textarea');
+            var elements = $(this).find('input, select, textarea');
 
-            const addonIdx = $(this).attr("data-addonidx");
-            const answersDiv = $('div[data-idx="0"][data-addonidx="' + addonIdx + '"]');
-            const answers = answersDiv.find('input, select, textarea');
+            var addonIdx = $(this).attr("data-addonidx");
+            var answersDiv = $('div[data-idx="' + (idx - 1) + '"][data-addonidx="' + addonIdx + '"]');
+            var answers = answersDiv.find('input, select, textarea');
 
             copy_answers(elements, answers);
         })
@@ -279,11 +308,11 @@ $(function () {
     $(".js-copy-answers-addon").click(function (e) {
         e.preventDefault();
         e.stopPropagation();
-        const id = $(this).data('id');
-        const addonId = $(this).data('addonid');
-        const addonDiv = $('div[data-idx="' + id +'"][data-addonidx="' + addonId + '"]');
-        const elements = addonDiv.find('input, select, textarea');
-        const answers = $('*[data-idx="' + id + '"] input, *[data-idx="' + id + '"] select, *[data-idx="' + id + '"] textarea');
+        var id = $(this).data('id');
+        var addonId = $(this).data('addonid');
+        var addonDiv = $('div[data-idx="' + id +'"][data-addonidx="' + addonId + '"]');
+        var elements = addonDiv.find('input, select, textarea');
+        var answers = $('[data-idx="' + id + '"][data-addonidx="' + (addonId - 1) + '"] input, [data-idx="' + id + '"][data-addonidx="' + (addonId - 1) + '"] select, [data-idx="' + id + '"][data-addonidx="' + (addonId - 1) + '"] textarea').reverse();
         copy_answers(elements, answers);
         return false;
     });
@@ -428,7 +457,7 @@ $(function () {
                 }
             };
         update();
-        dependency.closest('.form-group, form').find('input[name=' + dependency.attr("name") + ']').on("change", update);
+        dependency.closest('.form-group, form').find('input[name=' + dependency.attr("name") + '], select[name=' + dependency.attr("name") + ']').on("change", update);
         dependency.closest('.form-group, form').find('input[name=' + dependency.attr("name") + ']').on("dp.change", update);
     });
 
@@ -525,12 +554,11 @@ $(function () {
         }
     });
 
-    // Week calendar
-    // On mobile, auto-collapse all days except today, if we have more than 15 events in total
-    if ($(window).width() < 992 && $(".week-calendar .event").length > 15) {
-        $(".week-calendar .weekday:not(.today)").each(function () {
-            $(this).prop("open", false);
-        });
+    // For a very weird reason, window width is 0 on an initial load of the widget
+    if ($(window).width() > 0) {
+        setup_week_calendar()
+    } else {
+        $(window).on('resize', setup_week_calendar)
     }
 
     // Day calendar
@@ -638,11 +666,22 @@ $(function () {
     // Lightbox
     lightbox.init();
 
-    // free-range price input auto-check checkbox
+    // free-range price input auto-check checkbox/set count-input to 1 if 0
     $("[data-checked-onchange]").each(function() {
-        var checkbox = this;
+        var countInput = this;
         $("#" + this.getAttribute("data-checked-onchange")).on("change", function() {
-            checkbox.checked = true;
+            if (countInput.type === "checkbox") {
+                if (countInput.checked) return;
+                countInput.checked = true;
+            }
+            else if (countInput.type === "number" && !countInput.valueAsNumber) {
+                countInput.value = "1";
+            }
+            else {
+                return;
+            }
+            // in case of a change, trigger event
+            $(countInput).trigger("change");
         });
     });
 });
@@ -677,6 +716,8 @@ function copy_answers(elements, answers) {
                             input.prop("checked", answers.filter("[name$=" + suffix + "]").prop("checked"));
                         }
                         break;
+                    case "file":
+                        break
                     default:
                         input.val(answers.filter("[name$=" + suffix + "]").val());
                 }

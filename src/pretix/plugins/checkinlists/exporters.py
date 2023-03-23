@@ -33,7 +33,6 @@
 # License for the specific language governing permissions and limitations under the License.
 
 from collections import OrderedDict
-from datetime import datetime, time, timedelta
 
 import bleach
 import dateutil.parser
@@ -44,8 +43,10 @@ from django.db.models import (
 from django.db.models.functions import Coalesce, NullIf
 from django.urls import reverse
 from django.utils.formats import date_format
-from django.utils.timezone import is_aware, make_aware
-from django.utils.translation import gettext as _, gettext_lazy, pgettext
+from django.utils.timezone import is_aware, make_aware, now
+from django.utils.translation import (
+    gettext as _, gettext_lazy, pgettext, pgettext_lazy,
+)
 from pytz import UTC
 from reportlab.lib.units import mm
 from reportlab.platypus import Flowable, Paragraph, Spacer, Table, TableStyle
@@ -56,6 +57,10 @@ from pretix.base.models import (
 )
 from pretix.base.settings import PERSON_NAME_SCHEMES
 from pretix.base.templatetags.money import money_filter
+from pretix.base.timeframes import (
+    DateFrameField,
+    resolve_timeframe_to_datetime_start_inclusive_end_exclusive,
+)
 from pretix.control.forms.widgets import Select2
 from pretix.helpers.templatetags.jsonfield import JSONExtract
 from pretix.plugins.reports.exporters import ReportlabExportMixin
@@ -76,19 +81,12 @@ class CheckInListMixin(BaseExporter):
                      ),
                      initial=self.event.checkin_lists.first()
                  )),
-                ('date_from',
-                 forms.DateField(
-                     label=_('Start date'),
-                     widget=forms.DateInput(attrs={'class': 'datepickerfield'}),
+                ('date_range',
+                 DateFrameField(
+                     label=_('Date range'),
+                     include_future_frames=True,
                      required=False,
-                     help_text=_('Only include tickets for dates on or after this date.')
-                 )),
-                ('date_to',
-                 forms.DateField(
-                     label=_('End date'),
-                     widget=forms.DateInput(attrs={'class': 'datepickerfield'}),
-                     required=False,
-                     help_text=_('Only include tickets for dates on or before this date.')
+                     help_text=_('Only include tickets for dates within this range.')
                  )),
                 ('secrets',
                  forms.BooleanField(
@@ -127,8 +125,7 @@ class CheckInListMixin(BaseExporter):
         )
 
         if not self.event.has_subevents:
-            del d['date_from']
-            del d['date_to']
+            del d['date_range']
 
         d['list'].queryset = self.event.checkin_lists.all()
         d['list'].widget = Select2(
@@ -179,19 +176,12 @@ class CheckInListMixin(BaseExporter):
         if cl.subevent:
             qs = qs.filter(subevent=cl.subevent)
 
-        if form_data.get('date_from'):
-            dt = make_aware(datetime.combine(
-                dateutil.parser.parse(form_data['date_from']).date(),
-                time(hour=0, minute=0, second=0)
-            ), self.event.timezone)
-            qs = qs.filter(subevent__date_from__gte=dt)
-
-        if form_data.get('date_to'):
-            dt = make_aware(datetime.combine(
-                dateutil.parser.parse(form_data['date_to']).date() + timedelta(days=1),
-                time(hour=0, minute=0, second=0)
-            ), self.event.timezone)
-            qs = qs.filter(subevent__date_from__lt=dt)
+        if form_data.get('date_range'):
+            dt_start, dt_end = resolve_timeframe_to_datetime_start_inclusive_end_exclusive(now(), form_data['date_range'], self.timezone)
+            if dt_start:
+                qs = qs.filter(subevent__date_from__gte=dt_start)
+            if dt_end:
+                qs = qs.filter(subevent__date_from__lt=dt_end)
 
         o = ()
         if self.event.has_subevents and not cl.subevent:
@@ -226,10 +216,13 @@ class CheckInListMixin(BaseExporter):
             )
 
         if form_data.get('attention_only'):
-            qs = qs.filter(Q(item__checkin_attention=True) | Q(order__checkin_attention=True))
+            qs = qs.filter(Q(item__checkin_attention=True) | Q(order__checkin_attention=True) | Q(variation__checkin_attention=True))
 
         if not cl.include_pending:
-            qs = qs.filter(order__status=Order.STATUS_PAID)
+            qs = qs.filter(
+                Q(order__status=Order.STATUS_PAID) |
+                Q(order__status=Order.STATUS_PENDING, order__valid_if_pending=True)
+            )
         else:
             qs = qs.filter(order__status__in=(Order.STATUS_PAID, Order.STATUS_PENDING))
 
@@ -263,6 +256,9 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
     name = "overview"
     identifier = 'checkinlistpdf'
     verbose_name = gettext_lazy('Check-in list (PDF)')
+    category = pgettext_lazy('export_category', 'Check-in')
+    description = gettext_lazy("Download a PDF version of a check-in list that can be used to check people in at the "
+                               "event without digital methods.")
 
     @property
     def export_form_fields(self):
@@ -370,12 +366,15 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
                 )
             if op.seat:
                 item += '<br/>' + str(op.seat)
+            name = bleach.clean(str(name), tags=['br']).strip().replace('<br>', '<br/>')
+            if op.blocked:
+                name = '<font face="OpenSansBd">[' + _('Blocked') + ']</font> ' + name
             row = [
-                '!!' if op.item.checkin_attention or op.order.checkin_attention else '',
-                CBFlowable(bool(op.last_checked_in)),
+                '!!' if op.require_checkin_attention else '',
+                CBFlowable(bool(op.last_checked_in)) if not op.blocked else '—',
                 '✘' if op.order.status != Order.STATUS_PAID else '✔',
                 op.order.code,
-                Paragraph(bleach.clean(str(name), tags=['br']).strip().replace('<br>', '<br/>'), self.get_style()),
+                Paragraph(name, self.get_style()),
                 Paragraph(bleach.clean(str(item), tags=['br']).strip().replace('<br>', '<br/>'), self.get_style()),
             ]
             acache = {}
@@ -408,6 +407,12 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
                     ('TEXTCOLOR', (2, len(tdata)), (2, len(tdata)), '#ffffff'),
                     ('ALIGN', (2, len(tdata)), (2, len(tdata)), 'CENTER'),
                 ]
+            if op.blocked:
+                tstyledata += [
+                    ('BACKGROUND', (1, len(tdata)), (1, len(tdata)), '#990000'),
+                    ('TEXTCOLOR', (1, len(tdata)), (1, len(tdata)), '#ffffff'),
+                    ('ALIGN', (1, len(tdata)), (1, len(tdata)), 'CENTER'),
+                ]
             tdata.append(row)
 
         table = Table(tdata, colWidths=colwidths, repeatRows=1)
@@ -420,6 +425,9 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
     name = "overview"
     identifier = 'checkinlist'
     verbose_name = gettext_lazy('Check-in list')
+    category = pgettext_lazy('export_category', 'Check-in')
+    description = gettext_lazy("Download a spreadsheet with all attendees that are included in a check-in list.")
+    featured = True
 
     @property
     def additional_form_fields(self):
@@ -444,7 +452,10 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
             _('Product'), _('Price'), _('Checked in'), _('Checked out'), _('Automatically checked in')
         ]
         if not cl.include_pending:
-            qs = qs.filter(order__status=Order.STATUS_PAID)
+            qs = qs.filter(
+                Q(order__status=Order.STATUS_PAID) |
+                Q(order__status=Order.STATUS_PENDING, order__valid_if_pending=True)
+            )
         else:
             qs = qs.filter(order__status__in=(Order.STATUS_PAID, Order.STATUS_PENDING))
             headers.append(_('Paid'))
@@ -474,6 +485,9 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
         headers.append(_('Seat zone'))
         headers.append(_('Seat row'))
         headers.append(_('Seat number'))
+        headers.append(_('Blocked'))
+        headers.append(_('Valid from'))
+        headers.append(_('Valid until'))
         headers += [
             _('Address'),
             _('ZIP code'),
@@ -569,7 +583,7 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
             row.append(op.voucher.code if op.voucher else "")
             row.append(op.order.datetime.astimezone(self.event.timezone).strftime('%Y-%m-%d'))
             row.append(op.order.datetime.astimezone(self.event.timezone).strftime('%H:%M:%S'))
-            row.append(_('Yes') if op.order.checkin_attention or op.item.checkin_attention else _('No'))
+            row.append(_('Yes') if op.require_checkin_attention else _('No'))
             row.append(op.order.comment or "")
 
             if op.seat:
@@ -584,6 +598,9 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
                 row += ['', '', '', '', '']
 
             row += [
+                _('Yes') if op.blocked else '',
+                date_format(op.valid_from, 'SHORT_DATETIME_FORMAT') if op.valid_from else '',
+                date_format(op.valid_until, 'SHORT_DATETIME_FORMAT') if op.valid_until else '',
                 op.street or '',
                 op.zipcode or '',
                 op.city or '',
@@ -601,6 +618,9 @@ class CheckinLogList(ListExporter):
     name = "checkinlog"
     identifier = 'checkinlog'
     verbose_name = gettext_lazy('Check-in log (all scans)')
+    category = pgettext_lazy('export_category', 'Check-in')
+    description = gettext_lazy("Download a spreadsheet with one line for every scan that happened at your check-in "
+                               "stations.")
 
     @property
     def additional_form_fields(self):
@@ -618,6 +638,7 @@ class CheckinLogList(ListExporter):
             _('Product'),
             _('Name'),
             _('Device'),
+            _('Offline'),
             _('Offline override'),
             _('Automatically checked in'),
             _('Gate'),
@@ -637,6 +658,13 @@ class CheckinLogList(ListExporter):
                 qs = qs.filter(Q(position__item_id__in=form_data['items']) | Q(raw_item_id__in=form_data['items']))
         if form_data.get('successful_only'):
             qs = qs.filter(successful=True)
+
+        if form_data.get('date_range'):
+            dt_start, dt_end = resolve_timeframe_to_datetime_start_inclusive_end_exclusive(now(), form_data['date_range'], self.timezone)
+            if dt_start:
+                qs = qs.filter(datetime__gte=dt_start)
+            if dt_end:
+                qs = qs.filter(datetime__lt=dt_end)
 
         yield self.ProgressSetTotal(total=qs.count())
 
@@ -664,6 +692,7 @@ class CheckinLogList(ListExporter):
                 str(ci.position.item) if ci.position else (str(ci.raw_item) if ci.raw_item else ''),
                 (ci.position.attendee_name or ia.name) if ci.position else '',
                 str(ci.device) if ci.device else '',
+                _('Yes') if ci.force_sent is True else (_('No') if ci.force_sent is False else '?'),
                 _('Yes') if ci.forced else _('No'),
                 _('Yes') if ci.auto_checked_in else _('No'),
                 str(ci.gate or ''),
@@ -701,6 +730,12 @@ class CheckinLogList(ListExporter):
                  forms.BooleanField(
                      label=_('Successful scans only'),
                      initial=True,
+                     required=False,
+                 )),
+                ('date_range',
+                 DateFrameField(
+                     label=_('Date range'),
+                     include_future_frames=False,
                      required=False,
                  )),
             ]

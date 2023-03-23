@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2022-04-28 16:44+0000\n"
+"POT-Creation-Date: 2023-03-08 15:04+0000\n"
 "PO-Revision-Date: 2021-12-03 08:37+0000\n"
 "Last-Translator: ExtremeX-BB <qq754163444@gmail.com>\n"
 "Language-Team: Chinese (Simplified) <https://translate.pretix.eu/projects/"
@@ -29,109 +29,109 @@ msgstr "标为已付款"
 msgid "Comment:"
 msgstr "注释:"
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:34
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:34
 msgid "PayPal"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:35
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:35
 msgid "Venmo"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:36
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:36
 msgid "Apple Pay"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:37
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:37
 msgid "Itaú"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:38
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:38
 msgid "PayPal Credit"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:39
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:39
 msgid "Credit Card"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:40
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:40
 msgid "PayPal Pay Later"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:41
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:41
 msgid "iDEAL"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:42
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:42
 msgid "SEPA Direct Debit"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:43
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:43
 msgid "Bancontact"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:44
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:44
 msgid "giropay"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:45
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:45
 msgid "SOFORT"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:46
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:46
 #, fuzzy
 #| msgid "Yes"
 msgid "eps"
 msgstr "是"
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:47
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:47
 msgid "MyBank"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:48
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:48
 msgid "Przelewy24"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:49
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:49
 msgid "Verkkopankki"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:50
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:50
 msgid "PayU"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:51
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:51
 msgid "BLIK"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:52
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:52
 msgid "Trustly"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:53
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:53
 msgid "Zimpler"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:54
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:54
 msgid "Maxima"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:55
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:55
 msgid "OXXO"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:56
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:56
 msgid "Boleto"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:57
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:57
 msgid "WeChat Pay"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:58
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:58
 msgid "Mercado Pago"
 msgstr ""
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:152
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:164
 #: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:48
 #, fuzzy
 #| msgctxt "widget"
@@ -139,13 +139,13 @@ msgstr ""
 msgid "Continue"
 msgstr "继续"
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:205
-#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:152
-#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:183
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:222
+#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:157
+#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:188
 msgid "Confirming your payment …"
 msgstr "正在确认您的付款…"
 
-#: pretix/plugins/paypal/static/pretixplugins/paypal/pretix-paypal.js:230
+#: pretix/plugins/paypal2/static/pretixplugins/paypal2/pretix-paypal.js:247
 msgid "Payment method unavailable"
 msgstr ""
 
@@ -167,11 +167,11 @@ msgstr "总收入"
 msgid "Contacting Stripe …"
 msgstr "正在联系Stripe …"
 
-#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:60
+#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:65
 msgid "Total"
 msgstr "总计"
 
-#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:159
+#: pretix/plugins/stripe/static/pretixplugins/stripe/pretix-stripe.js:164
 msgid "Contacting your bank …"
 msgstr "正在联系您的银行 …"
 
@@ -293,18 +293,34 @@ msgid "Ticket code revoked/changed"
 msgstr ""
 
 #: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:61
+#, fuzzy
+#| msgid "Ticket not paid"
+msgid "Ticket blocked"
+msgstr "票未支付"
+
+#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:62
+#, fuzzy
+#| msgid "Ticket not paid"
+msgid "Ticket not valid at this time"
+msgstr "票未支付"
+
+#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:63
 msgid "Order canceled"
 msgstr "订单已经取消"
 
-#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:62
+#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:64
+msgid "Ticket code is ambiguous on list"
+msgstr ""
+
+#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:65
 msgid "Checked-in Tickets"
 msgstr "已签到的票"
 
-#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:63
+#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:66
 msgid "Valid Tickets"
 msgstr "有效的票"
 
-#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:64
+#: pretix/plugins/webcheckin/static/pretixplugins/webcheckin/main.js:67
 msgid "Currently inside"
 msgstr ""
 
@@ -316,19 +332,19 @@ msgid "close"
 msgstr "关闭"
 
 #: pretix/static/pretixbase/js/asynctask.js:43
-#: pretix/static/pretixbase/js/asynctask.js:119
+#: pretix/static/pretixbase/js/asynctask.js:120
 msgid ""
 "Your request is currently being processed. Depending on the size of your "
 "event, this might take up to a few minutes."
 msgstr "您的请求当前正在处理中。根据活动规模，这可能需要几分钟的时间。"
 
 #: pretix/static/pretixbase/js/asynctask.js:48
-#: pretix/static/pretixbase/js/asynctask.js:124
+#: pretix/static/pretixbase/js/asynctask.js:125
 msgid "Your request has been queued on the server and will soon be processed."
 msgstr "您的请求已经在服务器上排队，很快会被处理。"
 
 #: pretix/static/pretixbase/js/asynctask.js:54
-#: pretix/static/pretixbase/js/asynctask.js:130
+#: pretix/static/pretixbase/js/asynctask.js:131
 msgid ""
 "Your request arrived on the server but we still wait for it to be processed. "
 "If this takes longer than two minutes, please contact us or go back in your "
@@ -337,37 +353,37 @@ msgstr ""
 "您的请求已提交到服务器，但仍在等待处理。如果等待超过两分钟，请与我们联系或返"
 "回您的浏览器再试一次。"
 
-#: pretix/static/pretixbase/js/asynctask.js:89
-#: pretix/static/pretixbase/js/asynctask.js:175
-#: pretix/static/pretixbase/js/asynctask.js:180
+#: pretix/static/pretixbase/js/asynctask.js:90
+#: pretix/static/pretixbase/js/asynctask.js:178
+#: pretix/static/pretixbase/js/asynctask.js:183
 #: pretix/static/pretixcontrol/js/ui/mail.js:24
 msgid "An error of type {code} occurred."
 msgstr "发生类型为{code}的错误。"
 
-#: pretix/static/pretixbase/js/asynctask.js:92
+#: pretix/static/pretixbase/js/asynctask.js:93
 msgid ""
 "We currently cannot reach the server, but we keep trying. Last error code: "
 "{code}"
 msgstr "我们目前无法连接到服务器，但我们一直在尝试。最后的错误代码为:{code}"
 
-#: pretix/static/pretixbase/js/asynctask.js:144
+#: pretix/static/pretixbase/js/asynctask.js:145
 #: pretix/static/pretixcontrol/js/ui/mail.js:21
 #, fuzzy
 #| msgid "The request took to long. Please try again."
 msgid "The request took too long. Please try again."
 msgstr "服务器请求超时。请再试一次。"
 
-#: pretix/static/pretixbase/js/asynctask.js:183
+#: pretix/static/pretixbase/js/asynctask.js:186
 #: pretix/static/pretixcontrol/js/ui/mail.js:26
 msgid ""
 "We currently cannot reach the server. Please try again. Error code: {code}"
 msgstr "我们目前无法连接到服务器。请再试一次。错误代码为:{code}"
 
-#: pretix/static/pretixbase/js/asynctask.js:205
+#: pretix/static/pretixbase/js/asynctask.js:215
 msgid "We are processing your request …"
 msgstr "我们正在处理你的请求…"
 
-#: pretix/static/pretixbase/js/asynctask.js:213
+#: pretix/static/pretixbase/js/asynctask.js:223
 msgid ""
 "We are currently sending your request to the server. If this takes longer "
 "than one minute, please check your internet connection and then reload this "
@@ -376,7 +392,7 @@ msgstr ""
 "我们正在将您的请求发送到服务器。如果超过一分钟，请检查您的互联网连接，然后刷"
 "新此页面，并重试。"
 
-#: pretix/static/pretixbase/js/asynctask.js:270
+#: pretix/static/pretixbase/js/asynctask.js:285
 #: pretix/static/pretixcontrol/js/ui/main.js:71
 msgid "Close message"
 msgstr "关闭消息"
@@ -478,54 +494,58 @@ msgstr ""
 msgid "minutes"
 msgstr ""
 
+#: pretix/static/pretixcontrol/js/ui/checkinrules.js:122
+msgid "Duplicate"
+msgstr ""
+
 #: pretix/static/pretixcontrol/js/ui/editor.js:71
 msgid "Check-in QR"
 msgstr "签到QR码"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:376
+#: pretix/static/pretixcontrol/js/ui/editor.js:385
 msgid "The PDF background file could not be loaded for the following reason:"
 msgstr "由于以下原因无法加载PDF背景文件:"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:624
+#: pretix/static/pretixcontrol/js/ui/editor.js:654
 msgid "Group of objects"
 msgstr "对象组"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:630
+#: pretix/static/pretixcontrol/js/ui/editor.js:660
 msgid "Text object"
 msgstr "文本对象"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:632
+#: pretix/static/pretixcontrol/js/ui/editor.js:662
 msgid "Barcode area"
 msgstr "条码区"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:634
+#: pretix/static/pretixcontrol/js/ui/editor.js:664
 #, fuzzy
 #| msgid "Barcode area"
 msgid "Image area"
 msgstr "条码区"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:636
+#: pretix/static/pretixcontrol/js/ui/editor.js:666
 msgid "Powered by pretix"
 msgstr "由pretix驱动"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:638
+#: pretix/static/pretixcontrol/js/ui/editor.js:668
 msgid "Object"
 msgstr "对象"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:642
+#: pretix/static/pretixcontrol/js/ui/editor.js:672
 msgid "Ticket design"
 msgstr "门票设计"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:932
+#: pretix/static/pretixcontrol/js/ui/editor.js:963
 msgid "Saving failed."
 msgstr "保存失败."
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:982
-#: pretix/static/pretixcontrol/js/ui/editor.js:1021
+#: pretix/static/pretixcontrol/js/ui/editor.js:1031
+#: pretix/static/pretixcontrol/js/ui/editor.js:1070
 msgid "Error while uploading your PDF file, please try again."
 msgstr "上传PDF文件时出错，请重试。"
 
-#: pretix/static/pretixcontrol/js/ui/editor.js:1006
+#: pretix/static/pretixcontrol/js/ui/editor.js:1055
 msgid "Do you really want to leave the editor without saving your changes?"
 msgstr "你真的想离开编辑器而不保存你的更改吗?"
 
@@ -541,45 +561,46 @@ msgstr "生成消息…"
 msgid "Unknown error."
 msgstr "未知错误。"
 
-#: pretix/static/pretixcontrol/js/ui/main.js:308
+#: pretix/static/pretixcontrol/js/ui/main.js:307
 msgid "Your color has great contrast and is very easy to read!"
 msgstr "你的配色有很高的对比度，非常易读!"
 
-#: pretix/static/pretixcontrol/js/ui/main.js:312
+#: pretix/static/pretixcontrol/js/ui/main.js:311
 msgid "Your color has decent contrast and is probably good-enough to read!"
 msgstr "你的配色有很好的对比度，可能足够易读!"
 
-#: pretix/static/pretixcontrol/js/ui/main.js:316
+#: pretix/static/pretixcontrol/js/ui/main.js:315
 msgid ""
 "Your color has bad contrast for text on white background, please choose a "
 "darker shade."
 msgstr "你的配色在白色背景下的文本对比度很差，请选择较深的颜色。"
 
-#: pretix/static/pretixcontrol/js/ui/main.js:454
-msgid "All"
-msgstr "所有"
-
-#: pretix/static/pretixcontrol/js/ui/main.js:455
-msgid "None"
-msgstr "无"
-
-#: pretix/static/pretixcontrol/js/ui/main.js:456
+#: pretix/static/pretixcontrol/js/ui/main.js:464
+#: pretix/static/pretixcontrol/js/ui/main.js:484
 msgid "Search query"
 msgstr ""
 
-#: pretix/static/pretixcontrol/js/ui/main.js:459
+#: pretix/static/pretixcontrol/js/ui/main.js:482
+msgid "All"
+msgstr "所有"
+
+#: pretix/static/pretixcontrol/js/ui/main.js:483
+msgid "None"
+msgstr "无"
+
+#: pretix/static/pretixcontrol/js/ui/main.js:487
 msgid "Selected only"
 msgstr ""
 
-#: pretix/static/pretixcontrol/js/ui/main.js:886
+#: pretix/static/pretixcontrol/js/ui/main.js:890
 msgid "Use a different name internally"
 msgstr "在内部使用一个不同的名称"
 
-#: pretix/static/pretixcontrol/js/ui/main.js:922
+#: pretix/static/pretixcontrol/js/ui/main.js:926
 msgid "Click to close"
 msgstr "点此关闭"
 
-#: pretix/static/pretixcontrol/js/ui/main.js:963
+#: pretix/static/pretixcontrol/js/ui/main.js:998
 msgid "You have unsaved changes!"
 msgstr ""
 
@@ -598,12 +619,12 @@ msgid "Count"
 msgstr "数量"
 
 #: pretix/static/pretixcontrol/js/ui/question.js:136
-#: pretix/static/pretixpresale/js/ui/questions.js:269
+#: pretix/static/pretixpresale/js/ui/questions.js:270
 msgid "Yes"
 msgstr "是"
 
 #: pretix/static/pretixcontrol/js/ui/question.js:137
-#: pretix/static/pretixpresale/js/ui/questions.js:269
+#: pretix/static/pretixpresale/js/ui/questions.js:270
 msgid "No"
 msgstr "否"
 
@@ -633,40 +654,40 @@ msgid "The items in your cart are reserved for you for one minute."
 msgid_plural "The items in your cart are reserved for you for {num} minutes."
 msgstr[0] "购物车中的物品将为您保留{num}分钟。"
 
-#: pretix/static/pretixpresale/js/ui/main.js:144
+#: pretix/static/pretixpresale/js/ui/main.js:152
 #, fuzzy
 #| msgctxt "widget"
 #| msgid "from %(currency)s %(price)s"
 msgid "The organizer keeps %(currency)s %(amount)s"
 msgstr "由 %(currency)s %(price)s"
 
-#: pretix/static/pretixpresale/js/ui/main.js:152
+#: pretix/static/pretixpresale/js/ui/main.js:160
 #, fuzzy
 #| msgctxt "widget"
 #| msgid "from %(currency)s %(price)s"
 msgid "You get %(currency)s %(amount)s back"
 msgstr "由 %(currency)s %(price)s"
 
-#: pretix/static/pretixpresale/js/ui/main.js:168
+#: pretix/static/pretixpresale/js/ui/main.js:176
 msgid "Please enter the amount the organizer can keep."
 msgstr ""
 
-#: pretix/static/pretixpresale/js/ui/main.js:364
+#: pretix/static/pretixpresale/js/ui/main.js:393
 msgid "Please enter a quantity for one of the ticket types."
 msgstr ""
 
-#: pretix/static/pretixpresale/js/ui/main.js:400
+#: pretix/static/pretixpresale/js/ui/main.js:429
 #, fuzzy
 #| msgid "Cart expired"
 msgid "required"
 msgstr "购物车已过期"
 
-#: pretix/static/pretixpresale/js/ui/main.js:503
-#: pretix/static/pretixpresale/js/ui/main.js:522
+#: pretix/static/pretixpresale/js/ui/main.js:532
+#: pretix/static/pretixpresale/js/ui/main.js:551
 msgid "Time zone:"
 msgstr ""
 
-#: pretix/static/pretixpresale/js/ui/main.js:513
+#: pretix/static/pretixpresale/js/ui/main.js:542
 msgid "Your local time:"
 msgstr ""
 
@@ -871,82 +892,90 @@ msgstr ""
 
 #: pretix/static/pretixpresale/js/widget/widget.js:56
 msgctxt "widget"
+msgid ""
+"Some or all ticket categories are currently sold out. If you want, you can "
+"add yourself to the waiting list. We will then notify if seats are available "
+"again."
+msgstr ""
+
+#: pretix/static/pretixpresale/js/widget/widget.js:57
+msgctxt "widget"
 msgid "Load more"
 msgstr ""
 
-#: pretix/static/pretixpresale/js/widget/widget.js:58
+#: pretix/static/pretixpresale/js/widget/widget.js:59
 msgid "Mo"
 msgstr "周一"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:59
+#: pretix/static/pretixpresale/js/widget/widget.js:60
 msgid "Tu"
 msgstr "周二"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:60
+#: pretix/static/pretixpresale/js/widget/widget.js:61
 msgid "We"
 msgstr "周三"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:61
+#: pretix/static/pretixpresale/js/widget/widget.js:62
 msgid "Th"
 msgstr "周四"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:62
+#: pretix/static/pretixpresale/js/widget/widget.js:63
 msgid "Fr"
 msgstr "周五"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:63
+#: pretix/static/pretixpresale/js/widget/widget.js:64
 msgid "Sa"
 msgstr "周六"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:64
+#: pretix/static/pretixpresale/js/widget/widget.js:65
 msgid "Su"
 msgstr "周天"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:67
+#: pretix/static/pretixpresale/js/widget/widget.js:68
 msgid "January"
 msgstr "一月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:68
+#: pretix/static/pretixpresale/js/widget/widget.js:69
 msgid "February"
 msgstr "二月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:69
+#: pretix/static/pretixpresale/js/widget/widget.js:70
 msgid "March"
 msgstr "三月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:70
+#: pretix/static/pretixpresale/js/widget/widget.js:71
 msgid "April"
 msgstr "四月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:71
+#: pretix/static/pretixpresale/js/widget/widget.js:72
 msgid "May"
 msgstr "五月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:72
+#: pretix/static/pretixpresale/js/widget/widget.js:73
 msgid "June"
 msgstr "六月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:73
+#: pretix/static/pretixpresale/js/widget/widget.js:74
 msgid "July"
 msgstr "七月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:74
+#: pretix/static/pretixpresale/js/widget/widget.js:75
 msgid "August"
 msgstr "八月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:75
+#: pretix/static/pretixpresale/js/widget/widget.js:76
 msgid "September"
 msgstr "九月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:76
+#: pretix/static/pretixpresale/js/widget/widget.js:77
 msgid "October"
 msgstr "十月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:77
+#: pretix/static/pretixpresale/js/widget/widget.js:78
 msgid "November"
 msgstr "十一月"
 
-#: pretix/static/pretixpresale/js/widget/widget.js:78
+#: pretix/static/pretixpresale/js/widget/widget.js:79
 msgid "December"
 msgstr "十二月"
 

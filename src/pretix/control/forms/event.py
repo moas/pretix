@@ -34,14 +34,17 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
 
+from decimal import Decimal
 from urllib.parse import urlencode, urlparse
 
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import validate_email
+from django.core.validators import MaxValueValidator
 from django.db.models import Prefetch, Q, prefetch_related_objects
-from django.forms import CheckboxSelectMultiple, formset_factory
+from django.forms import (
+    CheckboxSelectMultiple, formset_factory, inlineformset_factory,
+)
 from django.urls import reverse
 from django.utils.functional import cached_property
 from django.utils.html import escape
@@ -58,11 +61,12 @@ from pretix.base.channels import get_all_sales_channels
 from pretix.base.email import get_available_placeholders
 from pretix.base.forms import I18nModelForm, PlaceholderValidator, SettingsForm
 from pretix.base.models import Event, Organizer, TaxRule, Team
-from pretix.base.models.event import EventMetaValue, SubEvent
+from pretix.base.models.event import EventFooterLink, EventMetaValue, SubEvent
 from pretix.base.reldate import RelativeDateField, RelativeDateTimeField
 from pretix.base.settings import (
     PERSON_NAME_SCHEMES, PERSON_NAME_TITLE_GROUPS, validate_event_settings,
 )
+from pretix.base.validators import multimail_validate
 from pretix.control.forms import (
     MultipleLanguagesWidget, SlugWidget, SplitDateTimeField,
     SplitDateTimePickerWidget,
@@ -133,6 +137,8 @@ class EventWizardBasicsForm(I18nModelForm):
         help_text=_("Do you need to pay sales tax on your tickets? In this case, please enter the applicable tax rate "
                     "here in percent. If you have a more complicated tax situation, you can add more tax rates and "
                     "detailed configuration later."),
+        max_value=Decimal("100.00"),
+        min_value=Decimal("0.00"),
         required=False
     )
 
@@ -480,6 +486,7 @@ class EventSettingsForm(SettingsForm):
         'show_times',
         'show_items_outside_presale_period',
         'display_net_prices',
+        'hide_prices_from_attendees',
         'presale_start_show_date',
         'locales',
         'locale',
@@ -501,8 +508,10 @@ class EventSettingsForm(SettingsForm):
         'meta_noindex',
         'redirect_to_checkout_directly',
         'frontpage_subevent_ordering',
+        'low_availability_percentage',
         'event_list_type',
         'event_list_available_only',
+        'event_calendar_future_only',
         'frontpage_text',
         'event_info_text',
         'attendee_names_asked',
@@ -587,13 +596,14 @@ class EventSettingsForm(SettingsForm):
             (k, '{scheme}: {samples}'.format(
                 scheme=v[0],
                 samples=', '.join(v[1])
-            ))
+            ) if v[0] != ', '.join(v[1]) else v[0])
             for k, v in PERSON_NAME_TITLE_GROUPS.items()
         ]
         if not self.event.has_subevents:
             del self.fields['frontpage_subevent_ordering']
             del self.fields['event_list_type']
             del self.fields['event_list_available_only']
+            del self.fields['event_calendar_future_only']
 
         # create "virtual" fields for better UX when editing <name>_asked and <name>_required fields
         self.virtual_keys = []
@@ -664,6 +674,9 @@ class CancelSettingsForm(SettingsForm):
         'cancel_allow_user_until',
         'cancel_allow_user_paid',
         'cancel_allow_user_paid_until',
+        'cancel_allow_user_unpaid_keep',
+        'cancel_allow_user_unpaid_keep_fees',
+        'cancel_allow_user_unpaid_keep_percentage',
         'cancel_allow_user_paid_keep',
         'cancel_allow_user_paid_keep_fees',
         'cancel_allow_user_paid_keep_percentage',
@@ -672,10 +685,13 @@ class CancelSettingsForm(SettingsForm):
         'cancel_allow_user_paid_adjust_fees_step',
         'cancel_allow_user_paid_refund_as_giftcard',
         'cancel_allow_user_paid_require_approval',
+        'cancel_allow_user_paid_require_approval_fee_unknown',
         'change_allow_user_variation',
         'change_allow_user_price',
         'change_allow_user_until',
         'change_allow_user_addons',
+        'change_allow_user_if_checked_in',
+        'change_allow_attendee',
     ]
 
     def __init__(self, *args, **kwargs):
@@ -845,6 +861,7 @@ class InvoiceSettingsForm(SettingsForm):
         self.fields['invoice_generate_sales_channels'].choices = (
             (c.identifier, c.verbose_name) for c in get_all_sales_channels().values()
         )
+        self.fields['invoice_numbers_counter_length'].validators.append(MaxValueValidator(15))
 
     def clean(self):
         data = super().clean()
@@ -852,13 +869,6 @@ class InvoiceSettingsForm(SettingsForm):
         settings_dict.update(data)
         validate_event_settings(self.obj, data)
         return data
-
-
-def multimail_validate(val):
-    s = val.split(',')
-    for part in s:
-        validate_email(part.strip())
-    return s
 
 
 def contains_web_channel_validate(val):
@@ -923,6 +933,11 @@ class MailSettingsForm(SettingsForm):
         required=True,
         choices=[]
     )
+    mail_subject_order_placed = I18nFormField(
+        label=_("Subject sent to order contact address"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_placed = I18nFormField(
         label=_("Text sent to order contact address"),
         required=False,
@@ -934,12 +949,22 @@ class MailSettingsForm(SettingsForm):
                     'tickets, the following email will be sent out to the attendees.'),
         required=False,
     )
+    mail_subject_order_placed_attendee = I18nFormField(
+        label=_("Subject sent to attendees"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_placed_attendee = I18nFormField(
         label=_("Text sent to attendees"),
         required=False,
         widget=I18nTextarea,
     )
 
+    mail_subject_order_paid = I18nFormField(
+        label=_("Subject sent to order contact address"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_paid = I18nFormField(
         label=_("Text sent to order contact address"),
         required=False,
@@ -951,12 +976,22 @@ class MailSettingsForm(SettingsForm):
                     'tickets, the following email will be sent out to the attendees.'),
         required=False,
     )
+    mail_subject_order_paid_attendee = I18nFormField(
+        label=_("Subject sent to attendees"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_paid_attendee = I18nFormField(
         label=_("Text sent to attendees"),
         required=False,
         widget=I18nTextarea,
     )
 
+    mail_subject_order_free = I18nFormField(
+        label=_("Subject sent to order contact address"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_free = I18nFormField(
         label=_("Text sent to order contact address"),
         required=False,
@@ -968,21 +1003,46 @@ class MailSettingsForm(SettingsForm):
                     'tickets, the following email will be sent out to the attendees.'),
         required=False,
     )
+    mail_subject_order_free_attendee = I18nFormField(
+        label=_("Subject sent to attendees"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_free_attendee = I18nFormField(
         label=_("Text sent to attendees"),
         required=False,
         widget=I18nTextarea,
     )
 
+    mail_subject_order_changed = I18nFormField(
+        label=_("Subject"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_changed = I18nFormField(
         label=_("Text"),
         required=False,
         widget=I18nTextarea,
     )
+    mail_subject_resend_link = I18nFormField(
+        label=_("Subject (sent by admin)"),
+        required=False,
+        widget=I18nTextInput,
+    )
+    mail_subject_resend_link_attendee = I18nFormField(
+        label=_("Subject (sent by admin to attendee)"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_resend_link = I18nFormField(
         label=_("Text (sent by admin)"),
         required=False,
         widget=I18nTextarea,
+    )
+    mail_subject_resend_all_links = I18nFormField(
+        label=_("Subject (requested by user)"),
+        required=False,
+        widget=I18nTextInput,
     )
     mail_text_resend_all_links = I18nFormField(
         label=_("Text (requested by user)"),
@@ -997,14 +1057,51 @@ class MailSettingsForm(SettingsForm):
                     "value is 0, the mail will never be sent.")
     )
     mail_text_order_expire_warning = I18nFormField(
+        label=_("Text (if order will expire automatically)"),
+        required=False,
+        widget=I18nTextarea,
+    )
+    mail_subject_order_expire_warning = I18nFormField(
+        label=_("Subject (if order will expire automatically)"),
+        required=False,
+        widget=I18nTextInput,
+    )
+    mail_text_order_pending_warning = I18nFormField(
+        label=_("Text (if order will not expire automatically)"),
+        required=False,
+        widget=I18nTextarea,
+    )
+    mail_subject_order_pending_warning = I18nFormField(
+        label=_("Subject (if order will not expire automatically)"),
+        required=False,
+        widget=I18nTextInput,
+    )
+    mail_subject_order_incomplete_payment = I18nFormField(
+        label=_("Subject"),
+        required=False,
+        widget=I18nTextInput,
+    )
+    mail_text_order_incomplete_payment = I18nFormField(
         label=_("Text"),
         required=False,
         widget=I18nTextarea,
+        help_text=_("This email only applies to payment methods that can receive incomplete payments, "
+                    "such as bank transfer."),
+    )
+    mail_subject_waiting_list = I18nFormField(
+        label=_("Subject"),
+        required=False,
+        widget=I18nTextInput,
     )
     mail_text_waiting_list = I18nFormField(
         label=_("Text"),
         required=False,
         widget=I18nTextarea,
+    )
+    mail_subject_order_canceled = I18nFormField(
+        label=_("Subject"),
+        required=False,
+        widget=I18nTextInput,
     )
     mail_text_order_canceled = I18nFormField(
         label=_("Text"),
@@ -1016,6 +1113,11 @@ class MailSettingsForm(SettingsForm):
         required=False,
         widget=I18nTextarea,
     )
+    mail_subject_download_reminder = I18nFormField(
+        label=_("Subject sent to order contact address"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_download_reminder = I18nFormField(
         label=_("Text sent to order contact address"),
         required=False,
@@ -1026,6 +1128,11 @@ class MailSettingsForm(SettingsForm):
         help_text=_('If the order contains attendees with email addresses different from the person who orders the '
                     'tickets, the following email will be sent out to the attendees.'),
         required=False,
+    )
+    mail_subject_download_reminder_attendee = I18nFormField(
+        label=_("Subject sent to attendees"),
+        required=False,
+        widget=I18nTextInput,
     )
     mail_text_download_reminder_attendee = I18nFormField(
         label=_("Text sent to attendees"),
@@ -1039,50 +1146,93 @@ class MailSettingsForm(SettingsForm):
         help_text=_("This email will be sent out this many days before the order event starts. If the "
                     "field is empty, the mail will never be sent.")
     )
+    mail_subject_order_placed_require_approval = I18nFormField(
+        label=_("Subject for received order"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_placed_require_approval = I18nFormField(
-        label=_("Received order"),
+        label=_("Text for received order"),
         required=False,
         widget=I18nTextarea,
     )
+    mail_subject_order_approved = I18nFormField(
+        label=_("Subject for approved order"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_approved = I18nFormField(
-        label=_("Approved order"),
+        label=_("Text for approved order"),
         required=False,
         widget=I18nTextarea,
         help_text=_("This will only be sent out for non-free orders. Free orders will receive the free order "
                     "template from below instead."),
     )
+    mail_subject_order_approved_free = I18nFormField(
+        label=_("Subject for approved free order"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_approved_free = I18nFormField(
-        label=_("Approved free order"),
+        label=_("Text for approved free order"),
         required=False,
         widget=I18nTextarea,
         help_text=_("This will only be sent out for free orders. Non-free orders will receive the non-free order "
                     "template from above instead."),
     )
+    mail_subject_order_denied = I18nFormField(
+        label=_("Subject for denied order"),
+        required=False,
+        widget=I18nTextInput,
+    )
     mail_text_order_denied = I18nFormField(
-        label=_("Denied order"),
+        label=_("Text for denied order"),
         required=False,
         widget=I18nTextarea,
     )
     base_context = {
-        'mail_text_order_placed': ['event', 'order', 'payment'],
+        'mail_text_order_placed': ['event', 'order', 'payments'],
+        'mail_subject_order_placed': ['event', 'order', 'payments'],
         'mail_text_order_placed_attendee': ['event', 'order', 'position'],
+        'mail_subject_order_placed_attendee': ['event', 'order', 'position'],
         'mail_text_order_placed_require_approval': ['event', 'order'],
+        'mail_subject_order_placed_require_approval': ['event', 'order'],
         'mail_text_order_approved': ['event', 'order'],
+        'mail_subject_order_approved': ['event', 'order'],
         'mail_text_order_approved_free': ['event', 'order'],
+        'mail_subject_order_approved_free': ['event', 'order'],
         'mail_text_order_denied': ['event', 'order', 'comment'],
+        'mail_subject_order_denied': ['event', 'order', 'comment'],
         'mail_text_order_paid': ['event', 'order', 'payment_info'],
+        'mail_subject_order_paid': ['event', 'order', 'payment_info'],
         'mail_text_order_paid_attendee': ['event', 'order', 'position'],
+        'mail_subject_order_paid_attendee': ['event', 'order', 'position'],
         'mail_text_order_free': ['event', 'order'],
+        'mail_subject_order_free': ['event', 'order'],
         'mail_text_order_free_attendee': ['event', 'order', 'position'],
+        'mail_subject_order_free_attendee': ['event', 'order', 'position'],
         'mail_text_order_changed': ['event', 'order'],
+        'mail_subject_order_changed': ['event', 'order'],
         'mail_text_order_canceled': ['event', 'order', 'comment'],
+        'mail_subject_order_canceled': ['event', 'order', 'comment'],
         'mail_text_order_expire_warning': ['event', 'order'],
+        'mail_subject_order_expire_warning': ['event', 'order'],
+        'mail_text_order_pending_warning': ['event', 'order'],
+        'mail_subject_order_pending_warning': ['event', 'order'],
+        'mail_text_order_incomplete_payment': ['event', 'order', 'pending_sum'],
+        'mail_subject_order_incomplete_payment': ['event', 'order'],
         'mail_text_order_custom_mail': ['event', 'order'],
         'mail_text_download_reminder': ['event', 'order'],
+        'mail_subject_download_reminder': ['event', 'order'],
         'mail_text_download_reminder_attendee': ['event', 'order', 'position'],
+        'mail_subject_download_reminder_attendee': ['event', 'order', 'position'],
         'mail_text_resend_link': ['event', 'order'],
-        'mail_text_waiting_list': ['event', 'waiting_list_entry'],
+        'mail_subject_resend_link': ['event', 'order'],
+        'mail_subject_resend_link_attendee': ['event', 'order'],
+        'mail_text_waiting_list': ['event', 'waiting_list_entry', 'waiting_list_voucher'],
+        'mail_subject_waiting_list': ['event', 'waiting_list_entry', 'waiting_list_voucher'],
         'mail_text_resend_all_links': ['event', 'orders'],
+        'mail_subject_resend_all_links': ['event', 'orders'],
         'mail_attach_ical_description': ['event', 'event_or_subevent'],
     }
 
@@ -1229,7 +1379,10 @@ class TaxRuleLineForm(I18nForm):
     invoice_text = I18nFormField(
         label=_('Text on invoice'),
         required=False,
-        widget=I18nTextInput
+        widget=I18nTextInput,
+        widget_kwargs=dict(attrs={
+            'placeholder': _('Text on invoice'),
+        })
     )
 
 
@@ -1419,7 +1572,7 @@ class QuickSetupProductForm(I18nForm):
     )
     default_price = forms.DecimalField(
         label=_("Price (optional)"),
-        max_digits=7, decimal_places=2, required=False,
+        max_digits=13, decimal_places=2, required=False,
         localize=True,
         widget=forms.TextInput(
             attrs={
@@ -1483,4 +1636,26 @@ ConfirmTextFormset = formset_factory(
     ConfirmTextForm,
     formset=BaseConfirmTextFormSet,
     can_order=True, can_delete=True, extra=0
+)
+
+
+class EventFooterLinkForm(I18nModelForm):
+    class Meta:
+        model = EventFooterLink
+        fields = ('label', 'url')
+
+
+class BaseEventFooterLinkFormSet(I18nFormSetMixin, forms.BaseInlineFormSet):
+    def __init__(self, *args, **kwargs):
+        event = kwargs.pop('event', None)
+        if event:
+            kwargs['locales'] = event.settings.get('locales')
+        super().__init__(*args, **kwargs)
+
+
+EventFooterLinkFormset = inlineformset_factory(
+    Event, EventFooterLink,
+    EventFooterLinkForm,
+    formset=BaseEventFooterLinkFormSet,
+    can_order=False, can_delete=True, extra=0
 )

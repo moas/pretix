@@ -20,12 +20,12 @@
 # <https://www.gnu.org/licenses/>.
 #
 import re
+import types
 from inspect import isgenerator
 
 from openpyxl import Workbook
 from openpyxl.cell.cell import (
-    ILLEGAL_CHARACTERS_RE, KNOWN_TYPES, TIME_TYPES, TYPE_FORMULA, TYPE_STRING,
-    Cell,
+    KNOWN_TYPES, TIME_TYPES, TYPE_FORMULA, TYPE_STRING, Cell,
 )
 from openpyxl.compat import NUMERIC_TYPES
 from openpyxl.utils import column_index_from_string
@@ -48,6 +48,12 @@ There are mainly two problems this solves:
 
 - It removes characters considered invalid by Excel to avoid exporter crashes.
 """
+
+ILLEGAL_CHARACTERS_RE = re.compile(
+    # From the XML specification
+    # Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+    r'[^\u0020-\uD7FF\u0009\u000A\u000D\uE000-\uFFFD\U00010000-\U0010FFFF]'
+)
 
 
 def remove_invalid_excel_chars(val):
@@ -74,7 +80,30 @@ def SafeCell(*args, value=None, **kwargs):
     return c
 
 
-class SafeAppendMixin:
+class SafeWriteOnlyWorksheet(WriteOnlyWorksheet):
+    def append(self, row):
+        if not isgenerator(row) and not isinstance(row, (list, tuple, range)):
+            self._invalid_row(row)
+
+        self._get_writer()
+
+        if self._rows is None:
+            self._rows = self._write_rows()
+            next(self._rows)
+
+        filtered_row = []
+        for content in row:
+            if isinstance(content, Cell):
+                filtered_row.append(content)
+            else:
+                filtered_row.append(
+                    SafeCell(self, row=1, column=1, value=remove_invalid_excel_chars(content))
+                )
+
+        self._rows.send(filtered_row)
+
+
+class SafeWorksheet(Worksheet):
     def append(self, iterable):
         row_idx = self._current_row + 1
 
@@ -105,21 +134,16 @@ class SafeAppendMixin:
         self._current_row = row_idx
 
 
-class SafeWriteOnlyWorksheet(SafeAppendMixin, WriteOnlyWorksheet):
-    pass
-
-
-class SafeWorksheet(SafeAppendMixin, Worksheet):
-    pass
-
-
 class SafeWorkbook(Workbook):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self._sheets:
             # monkeypatch existing sheets
             for s in self._sheets:
-                s.append = SafeAppendMixin.append
+                if self.write_only:
+                    s.append = types.MethodType(SafeWriteOnlyWorksheet.append, s)
+                else:
+                    s.append = types.MethodType(SafeWorksheet.append, s)
 
     def create_sheet(self, title=None, index=None):
         if self.read_only:

@@ -20,6 +20,7 @@
 # <https://www.gnu.org/licenses/>.
 #
 import pytest
+from django.core import mail as djmail
 from django_scopes import scopes_disabled
 
 
@@ -81,6 +82,7 @@ def test_customer_create(token_client, organizer):
         data={
             'identifier': 'IGNORED',
             'email': 'bar@example.com',
+            'password': 'foobar',
             'name_parts': {
                 "_scheme": "given_family",
                 'given_name': 'John',
@@ -98,6 +100,30 @@ def test_customer_create(token_client, organizer):
         assert customer.is_active
         assert customer.name == 'John Doe'
         assert customer.is_verified
+        assert customer.check_password('foobar')
+    assert len(djmail.outbox) == 0
+
+
+@pytest.mark.django_db
+def test_customer_create_send_email(token_client, organizer):
+    resp = token_client.post(
+        '/api/v1/organizers/{}/customers/'.format(organizer.slug),
+        format='json',
+        data={
+            'identifier': 'IGNORED',
+            'email': 'bar@example.com',
+            'name_parts': {
+                "_scheme": "given_family",
+                'given_name': 'John',
+                'family_name': 'Doe',
+            },
+            'is_active': True,
+            'is_verified': True,
+            'send_email': True,
+        }
+    )
+    assert resp.status_code == 201
+    assert len(djmail.outbox) == 1
 
 
 @pytest.mark.django_db
@@ -112,6 +138,29 @@ def test_customer_patch(token_client, organizer, customer):
     assert resp.status_code == 200
     customer.refresh_from_db()
     assert customer.email == 'blubb@example.org'
+
+
+@pytest.mark.django_db
+def test_customer_patch_with_provider(token_client, organizer, customer):
+    with scopes_disabled():
+        customer.provider = organizer.sso_providers.create(
+            method="oidc",
+            name="OIDC OP",
+            configuration={}
+        )
+        customer.external_identifier = "123"
+        customer.save()
+
+    resp = token_client.patch(
+        '/api/v1/organizers/{}/customers/{}/'.format(organizer.slug, customer.identifier),
+        format='json',
+        data={
+            'external_identifier': '234',
+        }
+    )
+    assert resp.status_code == 200
+    customer.refresh_from_db()
+    assert customer.external_identifier == "123"
 
 
 @pytest.mark.django_db
@@ -130,3 +179,15 @@ def test_customer_delete(token_client, organizer, customer):
         '/api/v1/organizers/{}/customers/{}/'.format(organizer.slug, customer.identifier),
     )
     assert resp.status_code == 405
+
+
+@pytest.mark.django_db
+def test_customer_patch_invalid_name(token_client, organizer, customer):
+    resp = token_client.patch(
+        '/api/v1/organizers/{}/customers/{}/'.format(organizer.slug, customer.identifier),
+        format='json',
+        data={
+            'name_parts': 'should be a dictionary',
+        }
+    )
+    assert resp.status_code == 400

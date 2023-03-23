@@ -31,25 +31,28 @@
 # Unless required by applicable law or agreed to in writing, software distributed under the Apache License 2.0 is
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
-
+import copy
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
-from functools import partial, wraps
+from functools import wraps
 from itertools import groupby
 
 from django.conf import settings
+from django.contrib import messages
 from django.db.models import Exists, OuterRef, Prefetch, Sum
 from django.utils.functional import cached_property
 from django.utils.timezone import now
+from django.utils.translation import gettext_lazy as _
 from django_scopes import scopes_disabled
 
 from pretix.base.i18n import language
 from pretix.base.models import (
-    CartPosition, Customer, InvoiceAddress, ItemAddOn, OrderPosition, Question,
+    CartPosition, Customer, InvoiceAddress, ItemAddOn, Question,
     QuestionAnswer, QuestionOption,
 )
 from pretix.base.services.cart import get_fees
+from pretix.base.templatetags.money import money_filter
 from pretix.helpers.cookies import set_cookie_without_samesite
 from pretix.multidomain.urlreverse import eventreverse
 from pretix.presale.signals import question_form_fields
@@ -103,7 +106,7 @@ class CartMixin:
     def invoice_address(self):
         return cached_invoice_address(self.request)
 
-    def get_cart(self, answers=False, queryset=None, order=None, downloads=False):
+    def get_cart(self, answers=False, queryset=None, order=None, downloads=False, payments=None):
         if queryset is not None:
             prefetch = []
             if answers:
@@ -145,56 +148,32 @@ class CartMixin:
         # Group items of the same variation
         # We do this by list manipulations instead of a GROUP BY query, as
         # Django is unable to join related models in a .values() query
-        def keyfunc(pos, for_sorting=False):
-            if isinstance(pos, OrderPosition):
-                if pos.addon_to_id:
-                    i = pos.addon_to.positionid
-                else:
-                    i = pos.positionid
-            else:
-                if pos.addon_to_id:
-                    i = pos.addon_to_id
-                else:
-                    i = pos.pk
-
-            has_attendee_data = pos.item.admission and (
+        def group_key(pos):  # only used for grouping, sorting is done before already
+            has_attendee_data = pos.item.ask_attendee_data and (
                 self.request.event.settings.attendee_names_asked
                 or self.request.event.settings.attendee_emails_asked
+                or self.request.event.settings.attendee_company_asked
+                or self.request.event.settings.attendee_addresses_asked
                 or pos_additional_fields.get(pos.pk)
             )
+            grouping_allowed = (
+                # Never group when we have per-ticket download buttons
+                not downloads and
+                # Never group if the position has add-ons
+                pos.pk not in has_addons and
+                # Never group if we have answers to show
+                (not answers or (not has_attendee_data and not bool(pos.item.questions.all()))) and  # do not use .exists() to re-use prefetch cache
+                # Never group when we have a final order and a gift card code
+                (isinstance(pos, CartPosition) or not pos.item.issue_giftcard)
+            )
 
-            addon_penalty = 1 if pos.addon_to_id else 0
-
-            if downloads \
-                    or pos.pk in has_addons \
-                    or pos.item.issue_giftcard \
-                    or (answers and (has_attendee_data or bool(pos.item.questions.all()))):  # do not use .exists() to re-use prefetch cache
-                return (
-                    # standalone positions are grouped by main product position id, addons below them also sorted by position id
-                    i, addon_penalty, pos.positionid if isinstance(pos, OrderPosition) else pos.pk,
-                    # all other places are only used for positions that can be grouped. We just put zeros.
-                ) + (0, ) * 10
-
-            # positions are sorted and grouped by various attributes
-            category_key = (pos.item.category.position, pos.item.category.id) if pos.item.category is not None else (0, 0)
-            item_key = pos.item.position, pos.item_id
-            variation_key = (pos.variation.position, pos.variation.id) if pos.variation is not None else (0, 0)
-            grp = category_key + item_key + variation_key + (pos.price, (pos.voucher_id or 0), (pos.subevent_id or 0), (pos.seat_id or 0))
-            if pos.addon_to_id:
-                if for_sorting:
-                    ii = pos.positionid if isinstance(pos, OrderPosition) else pos.pk
-                else:
-                    ii = 0
-                return (
-                    i, addon_penalty, ii,
-                ) + category_key + item_key + variation_key + (pos.price, (pos.voucher_id or 0), (pos.subevent_id or 0), (pos.seat_id or 0))
-            return (
-                # These are grouped by attributes so we don't put any position ids
-                0, 0, 0,
-            ) + grp
+            if not grouping_allowed:
+                return (pos.pk,) + (0, ) * 6
+            else:
+                return (pos.addon_to_id or 0), pos.subevent_id, pos.item_id, pos.variation_id, pos.price, (pos.voucher_id or 0), (pos.seat_id or 0)
 
         positions = []
-        for k, g in groupby(sorted(lcp, key=partial(keyfunc, for_sorting=True)), key=keyfunc):
+        for k, g in groupby(sorted(lcp, key=lambda c: c.sort_key), key=group_key):
             g = list(g)
             group = g[0]
             group.count = len(g)
@@ -220,7 +199,8 @@ class CartMixin:
             fees = order.fees.all()
         elif positions:
             fees = get_fees(
-                self.request.event, self.request, total, self.invoice_address, self.cart_session.get('payment'),
+                self.request.event, self.request, total, self.invoice_address,
+                payments if payments is not None else self.cart_session.get('payments', []),
                 cartpos
             )
         else:
@@ -257,6 +237,57 @@ class CartMixin:
             'itemcount': sum(c.count for c in positions if not c.addon_to)
         }
 
+    def current_selected_payments(self, total, warn=False, total_includes_payment_fees=False):
+        raw_payments = copy.deepcopy(self.cart_session.get('payments', []))
+        payments = []
+        total_remaining = total
+        for p in raw_payments:
+            # This algorithm of treating min/max values and fees needs to stay in sync between the following
+            # places in the code base:
+            # - pretix.base.services.cart.get_fees
+            # - pretix.base.services.orders._get_fees
+            # - pretix.presale.views.CartMixin.current_selected_payments
+            if p.get('min_value') and total_remaining < Decimal(p['min_value']):
+                if warn:
+                    messages.warning(
+                        self.request,
+                        _('Your selected payment method can only be used for a payment of at least {amount}.').format(
+                            amount=money_filter(Decimal(p['min_value']), self.request.event.currency)
+                        )
+                    )
+                self._remove_payment(p['id'])
+                continue
+
+            to_pay = total_remaining
+            if p.get('max_value') and to_pay > Decimal(p['max_value']):
+                to_pay = min(to_pay, Decimal(p['max_value']))
+
+            pprov = self.request.event.get_payment_providers(cached=True).get(p['provider'])
+            if not pprov:
+                self._remove_payment(p['id'])
+                continue
+
+            if not total_includes_payment_fees:
+                fee = pprov.calculate_fee(to_pay)
+                total_remaining += fee
+                to_pay += fee
+            else:
+                fee = Decimal('0.00')
+
+            if p.get('max_value') and to_pay > Decimal(p['max_value']):
+                to_pay = min(to_pay, Decimal(p['max_value']))
+
+            p['payment_amount'] = to_pay
+            p['provider_name'] = pprov.public_name
+            p['pprov'] = pprov
+            p['fee'] = fee
+            total_remaining -= to_pay
+            payments.append(p)
+        return payments
+
+    def _remove_payment(self, payment_id):
+        self.cart_session['payments'] = [p for p in self.cart_session['payments'] if p.get('id') != payment_id]
+
 
 def cart_exists(request):
     from pretix.presale.views.cart import get_or_create_cart_id
@@ -290,7 +321,7 @@ def get_cart(request):
                 'item__category__position', 'item__category_id', 'item__position', 'item__name', 'variation__value'
             ).select_related(
                 'item', 'variation', 'subevent', 'subevent__event', 'subevent__event__organizer',
-                'item__tax_rule', 'addon_to', 'used_membership', 'used_membership__membership_type'
+                'item__tax_rule', 'item__category', 'used_membership', 'used_membership__membership_type'
             ).select_related(
                 'addon_to'
             ).prefetch_related(
@@ -311,8 +342,12 @@ def get_cart(request):
                          ).select_related('dependency_question'),
                          to_attr='questions_to_ask')
             )
+            by_id = {cp.pk: cp for cp in request._cart_cache}
             for cp in request._cart_cache:
-                cp.event = request.event  # Populate field with known value to save queries
+                # Populate fields with known values to save queries
+                cp.event = request.event
+                if cp.addon_to_id:
+                    cp.addon_to = by_id[cp.addon_to_id]
     return request._cart_cache
 
 
@@ -354,7 +389,7 @@ def get_cart_is_free(request):
         pos = get_cart(request)
         ia = get_cart_invoice_address(request)
         total = get_cart_total(request)
-        fees = get_fees(request.event, request, total, ia, cs.get('payment'), pos)
+        fees = get_fees(request.event, request, total, ia, cs.get('payments', []), pos)
         request._cart_free_cache = total + sum(f.value for f in fees) == Decimal('0.00')
     return request._cart_free_cache
 

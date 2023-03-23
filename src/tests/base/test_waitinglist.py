@@ -37,15 +37,13 @@ from pretix.testutils.scope import classscope
 
 
 class WaitingListTestCase(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        cls.o = Organizer.objects.create(name='Dummy', slug='dummy')
-        cls.event = Event.objects.create(
-            organizer=cls.o, name='Dummy', slug='dummy',
-            date_from=now(), live=True
-        )
 
     def setUp(self):
+        self.o = Organizer.objects.create(name='Dummy', slug='dummy')
+        self.event = Event.objects.create(
+            organizer=self.o, name='Dummy', slug='dummy',
+            date_from=now(), live=True
+        )
         djmail.outbox = []
         with scope(organizer=self.o):
             self.quota = Quota.objects.create(name="Test", size=2, event=self.event)
@@ -122,12 +120,16 @@ class WaitingListTestCase(TestCase):
     def test_send_custom_validity(self):
         self.event.settings.set('waiting_list_hours', 24)
         wle = WaitingListEntry.objects.create(
-            event=self.event, item=self.item2, variation=self.var1, email='foo@bar.com'
+            event=self.event, item=self.item2, variation=self.var1, email='foo@bar.com',
+            name_parts={'_legacy': 'Max'}
         )
         wle.send_voucher()
         wle.refresh_from_db()
 
         assert 3600 * 23 < (wle.voucher.valid_until - now()).seconds < 3600 * 24
+
+        assert 'foo@bar.com' in wle.voucher.comment
+        assert 'Max' in wle.voucher.comment
 
     def test_send_auto(self):
         with scope(organizer=self.o):

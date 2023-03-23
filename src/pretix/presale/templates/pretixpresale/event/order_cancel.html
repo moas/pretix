@@ -22,12 +22,25 @@
             data-asynctask
             class="">
         {% if request.event.settings.cancel_allow_user_paid_require_approval and order.status == "p" and order.total != 0 %}
-            <p>
-                {% blocktrans trimmed %}
-                    You can request the cancellation of your order on this page. The event organizer will then decide
-                    on your request. If they approve, your order will be canceled and all tickets will be invalidated.
-                {% endblocktrans %}
-            </p>
+            {% if request.event.settings.cancel_allow_user_paid_require_approval_fee_unknown %}
+                <p>
+                    {% blocktrans trimmed %}
+                        You can request to cancel this order.
+                    {% endblocktrans %}
+                    {% blocktrans trimmed %}
+                        If your request is approved, the organizer will determine if you will receive a
+                        full refund or if a cancellation fee is deducted according to their cancellation
+                        policy.
+                    {% endblocktrans %}
+                </p>
+            {% else %}
+                <p>
+                    {% blocktrans trimmed %}
+                        You can request the cancellation of your order on this page. The event organizer will then decide
+                        on your request. If they approve, your order will be canceled and all tickets will be invalidated.
+                    {% endblocktrans %}
+                </p>
+            {% endif %}
         {% else %}
             <p>
                 {% blocktrans trimmed %}
@@ -37,6 +50,12 @@
             </p>
         {% endif %}
 
+        {% if order.status == "n" and order.total != 0 and order.user_cancel_fee %}
+            {% blocktrans trimmed with fee=order.user_cancel_fee|money:request.event.currency %}
+                You can cancel this order. As per our cancellation policy, you will still be required
+                to pay a cancellation fee of <strong>{{ fee }}</strong>.
+            {% endblocktrans %}
+        {% elif not request.event.settings.cancel_allow_user_paid_require_approval or not request.event.settings.cancel_allow_user_paid_require_approval_fee_unknown %}
         {% if request.event.settings.cancel_allow_user_paid_adjust_fees and order.status == "p" and order.total != 0 %}
             <p>
                 {% if cancel_fee %}
@@ -82,8 +101,9 @@
                 <strong>{% trans "Refund amount:" %}</strong> {{ refund_amount|money:request.event.currency }}
             </p>
         {% endif %}
+        {% endif %}
 
-        {% if refund_amount %}
+        {% if refund_amount > 0 %}
             {% if request.event.settings.cancel_allow_user_paid_refund_as_giftcard == "manually" %}
                 <strong>
                     {% trans "The organizer will get in touch with you to clarify the details of your refund." %}

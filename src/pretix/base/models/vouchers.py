@@ -137,6 +137,8 @@ class Voucher(LoggedModel):
     :type max_usages: int
     :param redeemed: The number of times this voucher already has been redeemed
     :type redeemed: int
+    :param min_usages: The minimum number of times this voucher must be redeemed
+    :type min_usages: int
     :param valid_until: The expiration date of this voucher (optional)
     :type valid_until: datetime
     :param block_quota: If set to true, this voucher will reserve quota for its holder
@@ -199,11 +201,19 @@ class Voucher(LoggedModel):
         verbose_name=_("Redeemed"),
         default=0
     )
+    min_usages = models.PositiveIntegerField(
+        verbose_name=_("Minimum usages"),
+        help_text=_("If set to more than one, the voucher must be redeemed for this many products when it is used for "
+                    "the first time. On later usages, it can also be used for lower numbers of products. Note that "
+                    "this means that the total number of usages in some cases can be lower than this limit, e.g. in "
+                    "case of cancellations."),
+        default=1
+    )
     budget = models.DecimalField(
         verbose_name=_("Maximum discount budget"),
         help_text=_("This is the maximum monetary amount that will be discounted using this voucher across all usages. "
                     "If this is sum reached, the voucher can no longer be used."),
-        decimal_places=2, max_digits=10,
+        decimal_places=2, max_digits=13,
         null=True, blank=True
     )
     valid_until = models.DateTimeField(
@@ -233,7 +243,7 @@ class Voucher(LoggedModel):
     )
     value = models.DecimalField(
         verbose_name=_("Voucher value"),
-        decimal_places=2, max_digits=10, null=True, blank=True,
+        decimal_places=2, max_digits=13, null=True, blank=True,
     )
     item = models.ForeignKey(
         Item, related_name='vouchers',
@@ -321,8 +331,12 @@ class Voucher(LoggedModel):
             if item:
                 raise ValidationError(_('You cannot select a quota and a specific product at the same time.'))
         elif item:
+            if item.require_bundling or (item.category_id and item.category.is_addon):
+                raise ValidationError(_('You cannot select a product that is only available as an add-on product or '
+                                        'as part of a bundle, since vouchers cannot be applied to add-on products or '
+                                        'bundled products.'))
             if item.event != event:
-                raise ValidationError(_('You cannot select an item that belongs to a different event.'))
+                raise ValidationError(_('You cannot select a product that belongs to a different event.'))
             if variation and (not item or not item.has_variations):
                 raise ValidationError(_('You cannot select a variation without having selected a product that provides '
                                         'variations.'))
@@ -349,6 +363,10 @@ class Voucher(LoggedModel):
                 params={
                     'redeemed': redeemed
                 }
+            )
+        if data.get('max_usages', 1) < data.get('min_usages', 1):
+            raise ValidationError(
+                _('The maximum number of usages may not be lower than the minimum number of usages.'),
             )
 
     @staticmethod
@@ -464,7 +482,7 @@ class Voucher(LoggedModel):
         if quota:
             raise ValidationError(_('You need to choose a specific product if you select a seat.'))
 
-        if data.get('max_usages', 1) > 1:
+        if data.get('max_usages', 1) > 1 or data.get('min_usages', 1) > 1:
             raise ValidationError(_('Seat-specific vouchers can only be used once.'))
 
         if item and seat.product != item:
@@ -567,6 +585,10 @@ class Voucher(LoggedModel):
         else:
             return bool(subevent.seating_plan) if subevent else self.event.seating_plan
 
+    @property
+    def min_usages_remaining(self):
+        return max(1, self.min_usages - self.redeemed)
+
     @classmethod
     def annotate_budget_used_orders(cls, qs):
         opq = OrderPosition.objects.filter(
@@ -577,7 +599,7 @@ class Voucher(LoggedModel):
                 Order.STATUS_PENDING
             ]
         ).order_by().values('voucher_id').annotate(s=Sum('voucher_budget_use')).values('s')
-        return qs.annotate(budget_used_orders=Coalesce(Subquery(opq, output_field=models.DecimalField(max_digits=10, decimal_places=2)), Decimal('0.00')))
+        return qs.annotate(budget_used_orders=Coalesce(Subquery(opq, output_field=models.DecimalField(max_digits=13, decimal_places=2)), Decimal('0.00')))
 
     def budget_used(self):
         ops = OrderPosition.objects.filter(

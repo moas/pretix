@@ -53,6 +53,7 @@ var strings = {
     'next_week': django.pgettext('widget', 'Next week'),
     'previous_week': django.pgettext('widget', 'Previous week'),
     'show_seating': django.pgettext('widget', 'Open seat selection'),
+    'seating_plan_waiting_list': django.pgettext('widget', 'Some or all ticket categories are currently sold out. If you want, you can add yourself to the waiting list. We will then notify if seats are available again.'),
     'load_more': django.pgettext('widget', 'Load more'),
     'days': {
         'MO': django.gettext('Mo'),
@@ -193,7 +194,7 @@ var widget_id = makeid(16);
 Vue.component('availbox', {
     template: ('<div class="pretix-widget-availability-box">'
         + '<div class="pretix-widget-availability-unavailable" v-if="require_voucher">'
-        + '<small><a @click.prevent="focus_voucher_field">' + strings.voucher_required + '</a></small>'
+        + '<small><a @click.prevent.stop="focus_voucher_field">' + strings.voucher_required + '</a></small>'
         + '</div>'
         + '<div class="pretix-widget-availability-unavailable"'
         + '       v-if="!require_voucher && avail[0] < 100 && avail[0] > 10">'
@@ -306,7 +307,8 @@ Vue.component('pricebox', {
         price: Object,
         free_price: Boolean,
         field_name: String,
-        original_price: String
+        original_price: String,
+        mandatory_priced_addons: Boolean,
     },
     computed: {
         display_price: function () {
@@ -328,6 +330,9 @@ Vue.component('pricebox', {
         },
         priceline: function () {
             if (this.price.gross === "0.00") {
+                if (this.mandatory_priced_addons && !this.original_price) {
+                    return "\xA0"; // nbsp, because an empty string would cause the HTML element to collapse
+                }
                 return strings.free;
             } else {
                 return this.$root.currency + " " + this.display_price;
@@ -357,9 +362,10 @@ Vue.component('pricebox', {
     }
 });
 Vue.component('variation', {
-    template: ('<div class="pretix-widget-variation">'
+    template: ('<div class="pretix-widget-variation" :data-id="variation.id">'
         + '<div class="pretix-widget-item-row">'
 
+        // Variation description
         + '<div class="pretix-widget-item-info-col">'
         + '<div class="pretix-widget-item-title-and-description">'
         + '<strong class="pretix-widget-item-title">{{ variation.value }}</strong>'
@@ -371,12 +377,16 @@ Vue.component('variation', {
         + '</div>'
         + '</div>'
 
+        // Price
         + '<div class="pretix-widget-item-price-col">'
-        + '<pricebox :price="variation.price" :free_price="item.free_price" :original_price="orig_price"'
+        + '<pricebox :price="variation.price" :free_price="item.free_price" :original_price="orig_price" '
+        + '          :mandatory_priced_addons="item.mandatory_priced_addons"'
         + '          :field_name="\'price_\' + item.id + \'_\' + variation.id" v-if="$root.showPrices">'
         + '</pricebox>'
         + '<span v-if="!$root.showPrices">&nbsp;</span>'
         + '</div>'
+
+        // Availability
         + '<div class="pretix-widget-item-availability-col">'
         + '<availbox :item="item" :variation="variation"></availbox>'
         + '</div>'
@@ -401,14 +411,15 @@ Vue.component('variation', {
     }
 });
 Vue.component('item', {
-    template: ('<div v-bind:class="classObject">'
+    template: ('<div v-bind:class="classObject" :data-id="item.id">'
         + '<div class="pretix-widget-item-row pretix-widget-main-item-row">'
 
+        // Product description
         + '<div class="pretix-widget-item-info-col">'
         + '<img :src="item.picture" v-if="item.picture" class="pretix-widget-item-picture">'
         + '<div class="pretix-widget-item-title-and-description">'
         + '<a v-if="item.has_variations && show_toggle" class="pretix-widget-item-title" href="#"'
-        + '   @click.prevent="expand">'
+        + '   @click.prevent.stop="expand">'
         + '{{ item.name }}'
         + '</a>'
         + '<strong v-else class="pretix-widget-item-title">{{ item.name }}</strong>'
@@ -423,21 +434,26 @@ Vue.component('item', {
         + '</div>'
         + '</div>'
 
+        // Price
         + '<div class="pretix-widget-item-price-col">'
         + '<pricebox :price="item.price" :free_price="item.free_price" v-if="!item.has_variations && $root.showPrices"'
+        + '          :mandatory_priced_addons="item.mandatory_priced_addons"'
         + '          :field_name="\'price_\' + item.id" :original_price="item.original_price">'
         + '</pricebox>'
         + '<div class="pretix-widget-pricebox" v-if="item.has_variations && $root.showPrices">{{ pricerange }}</div>'
         + '<span v-if="!$root.showPrices">&nbsp;</span>'
         + '</div>'
+
+        // Availability
         + '<div class="pretix-widget-item-availability-col">'
-        + '<a v-if="show_toggle" href="#" @click.prevent="expand">'+ strings.variations + '</a>'
+        + '<a v-if="show_toggle" href="#" @click.prevent.stop="expand">'+ strings.variations + '</a>'
         + '<availbox v-if="!item.has_variations" :item="item"></availbox>'
         + '</div>'
 
         + '<div class="pretix-widget-clear"></div>'
         + '</div>'
 
+        // Variations
         + '<div :class="varClasses" v-if="item.has_variations">'
         + '<variation v-for="variation in item.variations" :variation="variation" :item="item" :key="variation.id">'
         + '</variation>'
@@ -490,6 +506,9 @@ Vue.component('item', {
                 return this.$root.currency + " " + floatformat(this.item.min_price, 2) + " – "
                     + floatformat(this.item.max_price, 2);
             } else if (this.item.min_price === "0.00" && this.item.max_price === "0.00") {
+                if (this.item.mandatory_priced_addons) {
+                    return "\xA0"; // nbsp, because an empty string would cause the HTML element to collapse
+                }
                 return strings.free;
             } else {
                 return this.$root.currency + " " + floatformat(this.item.min_price, 2);
@@ -498,7 +517,7 @@ Vue.component('item', {
     }
 });
 Vue.component('category', {
-    template: ('<div class="pretix-widget-category">'
+    template: ('<div class="pretix-widget-category" :data-id="category.id">'
         + '<h3 class="pretix-widget-category-name" v-if="category.name">{{ category.name }}</h3>'
         + '<div class="pretix-widget-category-description" v-if="category.description" v-html="category.description">'
         + '</div>'
@@ -686,7 +705,7 @@ var shared_iframe_fragment = (
     + '        referrerpolicy="origin">'
     + 'Please enable frames in your browser!'
     + '</iframe>'
-    + '<div class="pretix-widget-frame-close"><a href="#" @click.prevent="close">'
+    + '<div class="pretix-widget-frame-close"><a href="#" @click.prevent.stop="close" role="button" aria-label="'+strings.close+'">'
     + '<svg height="16px" viewBox="0 0 512 512" width="16px" xmlns="http://www.w3.org/2000/svg"><path fill="#fff" d="M437.5,386.6L306.9,256l130.6-130.6c14.1-14.1,14.1-36.8,0-50.9c-14.1-14.1-36.8-14.1-50.9,0L256,205.1L125.4,74.5  c-14.1-14.1-36.8-14.1-50.9,0c-14.1,14.1-14.1,36.8,0,50.9L205.1,256L74.5,386.6c-14.1,14.1-14.1,36.8,0,50.9  c14.1,14.1,36.8,14.1,50.9,0L256,306.9l130.6,130.6c14.1,14.1,36.8,14.1,50.9,0C451.5,423.4,451.5,400.6,437.5,386.6z"/></svg>'
     + '</a></div>'
     + '</div>'
@@ -698,8 +717,8 @@ var shared_alert_fragment = (
     + '<transition name="bounce">'
     + '<div class="pretix-widget-alert-box" v-if="$root.error_message">'
     + '<p>{{ $root.error_message }}</p>'
-    + '<p><button v-if="$root.error_url_after" @click.prevent="errorContinue">' + strings.continue + '</button>'
-    + '<button v-else @click.prevent="errorClose">' + strings.close + '</button></p>'
+    + '<p><button v-if="$root.error_url_after" @click.prevent.stop="errorContinue">' + strings.continue + '</button>'
+    + '<button v-else @click.prevent.stop="errorClose">' + strings.close + '</button></p>'
     + '</div>'
     + '</transition>'
     + '<svg width="64" height="64" viewBox="0 0 1792 1792" xmlns="http://www.w3.org/2000/svg" class="pretix-widget-alert-icon"><path style="fill:#ffffff;" d="M 599.86438,303.72882 H 1203.5254 V 1503.4576 H 599.86438 Z" /><path class="pretix-widget-primary-color" d="M896 128q209 0 385.5 103t279.5 279.5 103 385.5-103 385.5-279.5 279.5-385.5 103-385.5-103-279.5-279.5-103-385.5 103-385.5 279.5-279.5 385.5-103zm128 1247v-190q0-14-9-23.5t-22-9.5h-192q-13 0-23 10t-10 23v190q0 13 10 23t23 10h192q13 0 22-9.5t9-23.5zm-2-344l18-621q0-12-10-18-10-8-24-8h-220q-14 0-24 8-10 6-10 18l17 621q0 10 10 17.5t24 7.5h185q14 0 23.5-7.5t10.5-17.5z"/></svg>'
@@ -747,7 +766,7 @@ Vue.component('pretix-overlay', {
             this.$root.frame_shown = false;
             this.$root.parent.frame_dismissed = true;
             this.$root.parent.reload();
-            this.$root.trigger_close_callback();
+            this.$root.parent.trigger_close_callback();
         },
         iframeLoaded: function () {
             if (this.$root.frame_loading) {
@@ -760,49 +779,82 @@ Vue.component('pretix-overlay', {
 
 Vue.component('pretix-widget-event-form', {
     template: ('<div class="pretix-widget-event-form">'
+        // Back navigation
         + '<div class="pretix-widget-event-list-back" v-if="$root.events || $root.weeks || $root.days">'
-        + '<a href="#" @click.prevent="back_to_list" v-if="!$root.subevent">&lsaquo; '
+        + '<a href="#" @click.prevent.stop="back_to_list" v-if="!$root.subevent">&lsaquo; '
         + strings['back_to_list']
         + '</a>'
-        + '<a href="#" @click.prevent="back_to_list" v-if="$root.subevent">&lsaquo; '
+        + '<a href="#" @click.prevent.stop="back_to_list" v-if="$root.subevent">&lsaquo; '
         + strings['back_to_dates']
         + '</a>'
         + '</div>'
+
+        // Event name
         + '<div class="pretix-widget-event-header" v-if="$root.events || $root.weeks || $root.days">'
         + '<strong>{{ $root.name }}</strong>'
         + '</div>'
+
+        // Date range
         + '<div class="pretix-widget-event-details" v-if="($root.events || $root.weeks || $root.days) && $root.date_range">'
         + '{{ $root.date_range }}'
         + '</div>'
+
+        // Form start
         + '<div class="pretix-widget-event-description" v-if="($root.events || $root.weeks || $root.days) && $root.frontpage_text" v-html="$root.frontpage_text"></div>'
         + '<form method="post" :action="$root.formAction" ref="form" :target="$root.formTarget">'
         + '<input type="hidden" name="_voucher_code" :value="$root.voucher_code" v-if="$root.voucher_code">'
         + '<input type="hidden" name="subevent" :value="$root.subevent" />'
         + '<input type="hidden" name="widget_data" :value="$root.widget_data_json" />'
+
+        // Error message
         + '<div class="pretix-widget-error-message" v-if="$root.error">{{ $root.error }}</div>'
+
+        // Resume cart
         + '<div class="pretix-widget-info-message pretix-widget-clickable"'
         + '     v-if="$root.cart_exists">'
-        + '<button @click.prevent="$parent.resume" class="pretix-widget-resume-button" type="button">'
+        + '<button @click.prevent.stop="$parent.resume" class="pretix-widget-resume-button" type="button">'
         + strings['resume_checkout']
         + '</button>'
         + strings['cart_exists']
         + '<div class="pretix-widget-clear"></div>'
         + '</div>'
+
+        // Seating plan
         + '<div class="pretix-widget-seating-link-wrapper" v-if="this.$root.has_seating_plan">'
-        + '<button class="pretix-widget-seating-link" @click.prevent="$root.startseating">'
+        + '<button class="pretix-widget-seating-link" @click.prevent.stop="$root.startseating">'
         + strings['show_seating']
         + '</button>'
         + '</div>'
+
+        // Waiting list for seating plan
+        + '<div class="pretix-widget-seating-waitinglist" v-if="this.$root.has_seating_plan && this.$root.has_seating_plan_waitinglist">'
+        + '<div class="pretix-widget-seating-waitinglist-text">'
+        + strings['seating_plan_waiting_list']
+        + '</div>'
+        + '<div class="pretix-widget-seating-waitinglist-button-wrap">'
+        + '<button class="pretix-widget-seating-waitinglist-button" @click.prevent.stop="$root.startseating">'
+        + strings['waiting_list']
+        + '</button>'
+        + '</div>'
+        + '<div class="pretix-widget-clear"></div>'
+        + '</div>'
+
+        // Actual product list
         + '<category v-for="category in this.$root.categories" :category="category" :key="category.id"></category>'
+
+        // Buy button
         + '<div class="pretix-widget-action" v-if="$root.display_add_to_cart">'
         + '<button @click="$parent.buy" type="submit" :disabled="buy_disabled">{{ this.buy_label }}</button>'
         + '</div>'
+
         + '</form>'
+
+        // Voucher form
         + '<form method="get" :action="$root.voucherFormTarget" target="_blank" '
         + '      v-if="$root.vouchers_exist && !$root.disable_vouchers && !$root.voucher_code">'
         + '<div class="pretix-widget-voucher">'
         + '<h3 class="pretix-widget-voucher-headline">'+ strings['redeem_voucher'] +'</h3>'
-        + '<div v-if="$root.voucher_explanation_text" class="pretix-widget-voucher-text">{{ $root.voucher_explanation_text }}</div>'
+        + '<div v-if="$root.voucher_explanation_text" class="pretix-widget-voucher-text" v-html="$root.voucher_explanation_text"></div>'
         + '<div class="pretix-widget-voucher-input-wrap">'
         + '<input class="pretix-widget-voucher-input" ref="voucherinput" type="text" v-model="$parent.voucher" name="voucher" placeholder="'+strings.voucher_code+'">'
         + '</div>'
@@ -812,8 +864,10 @@ Vue.component('pretix-widget-event-form', {
         + '<div class="pretix-widget-voucher-button-wrap">'
         + '<button @click="$parent.redeem">' + strings.redeem + '</button>'
         + '</div>'
+        + '<div class="pretix-widget-clear"></div>'
         + '</div>'
         + '</form>'
+
         + '</div>'
     ),
     data: function () {
@@ -906,7 +960,7 @@ Vue.component('pretix-widget-event-form', {
 });
 
 Vue.component('pretix-widget-event-list-entry', {
-    template: ('<a :class="classObject" @click.prevent="select">'
+    template: ('<a :class="classObject" @click.prevent.stop="select">'
         + '<div class="pretix-widget-event-list-entry-name">{{ event.name }}</div>'
         + '<div class="pretix-widget-event-list-entry-date">{{ event.date_range }}</div>'
         + '<div class="pretix-widget-event-list-entry-location">{{ location }}</div>'  // hidden by css for now, but
@@ -946,7 +1000,7 @@ Vue.component('pretix-widget-event-list-entry', {
 Vue.component('pretix-widget-event-list', {
     template: ('<div class="pretix-widget-event-list">'
         + '<div class="pretix-widget-back" v-if="$root.weeks || $root.parent_stack.length > 0">'
-        + '<a href="#" @click.prevent="back_to_calendar">&lsaquo; '
+        + '<a href="#" @click.prevent.stop="back_to_calendar">&lsaquo; '
         + strings['back']
         + '</a>'
         + '</div>'
@@ -955,7 +1009,7 @@ Vue.component('pretix-widget-event-list', {
         + '</div>'
         + '<div class="pretix-widget-event-description" v-if="$root.parent_stack.length > 0 && $root.frontpage_text" v-html="$root.frontpage_text"></div>'
         + '<pretix-widget-event-list-entry v-for="event in $root.events" :event="event" :key="event.url"></pretix-widget-event-list-entry>'
-        + '<p class="pretix-widget-event-list-load-more" v-if="$root.has_more_events"><button @click.prevent="load_more">'+strings.load_more+'</button></p>'
+        + '<p class="pretix-widget-event-list-load-more" v-if="$root.has_more_events"><button @click.prevent.stop="load_more">'+strings.load_more+'</button></p>'
         + '</div>'),
     methods: {
         back_to_calendar: function () {
@@ -983,7 +1037,7 @@ Vue.component('pretix-widget-event-list', {
 });
 
 Vue.component('pretix-widget-event-calendar-event', {
-    template: ('<a :class="classObject" @click.prevent="select">'
+    template: ('<a :class="classObject" @click.prevent.stop="select">'
         + '<strong class="pretix-widget-event-calendar-event-name">'
         + '{{ event.name }}'
         + '</strong>'
@@ -1018,7 +1072,7 @@ Vue.component('pretix-widget-event-calendar-event', {
 });
 
 Vue.component('pretix-widget-event-week-cell', {
-    template: ('<div :class="classObject" @click.prevent="selectDay">'
+    template: ('<div :class="classObject" @click.prevent.stop="selectDay">'
         + '<div class="pretix-widget-event-calendar-day" v-if="day">'
         + '{{ dayhead }}'
         + '</div>'
@@ -1076,7 +1130,7 @@ Vue.component('pretix-widget-event-week-cell', {
 });
 
 Vue.component('pretix-widget-event-calendar-cell', {
-    template: ('<td :class="classObject" @click.prevent="selectDay">'
+    template: ('<td :class="classObject" @click.prevent.stop="selectDay">'
         + '<div class="pretix-widget-event-calendar-day" v-if="day">'
         + '{{ daynum }}'
         + '</div>'
@@ -1144,24 +1198,32 @@ Vue.component('pretix-widget-event-calendar-row', {
 
 Vue.component('pretix-widget-event-calendar', {
     template: ('<div class="pretix-widget-event-calendar" ref="calendar">'
+
+        // Back navigation
         + '<div class="pretix-widget-back" v-if="$root.events !== undefined">'
-        + '<a href="#" @click.prevent="back_to_list">&lsaquo; '
+        + '<a href="#" @click.prevent.stop="back_to_list">&lsaquo; '
         + strings['back']
         + '</a>'
         + '</div>'
+
+        // Headline
         + '<div class="pretix-widget-event-header" v-if="$root.parent_stack.length > 0">'
         + '<strong>{{ $root.name }}</strong>'
         + '</div>'
         + '<div class="pretix-widget-event-description" v-if="$root.parent_stack.length > 0 && $root.frontpage_text" v-html="$root.frontpage_text"></div>'
+
+        // Calendar navigation
         + '<div class="pretix-widget-event-calendar-head">'
-        + '<a class="pretix-widget-event-calendar-previous-month" href="#" @click.prevent="prevmonth">&laquo; '
+        + '<a class="pretix-widget-event-calendar-previous-month" href="#" @click.prevent.stop="prevmonth">&laquo; '
         + strings['previous_month']
         + '</a> '
         + '<strong>{{ monthname }}</strong> '
-        + '<a class="pretix-widget-event-calendar-next-month" href="#" @click.prevent="nextmonth">'
+        + '<a class="pretix-widget-event-calendar-next-month" href="#" @click.prevent.stop="nextmonth">'
         + strings['next_month']
         + ' &raquo;</a>'
         + '</div>'
+
+        // Calendar
         + '<table class="pretix-widget-event-calendar-table">'
         + '<thead>'
         + '<tr>'
@@ -1220,30 +1282,38 @@ Vue.component('pretix-widget-event-calendar', {
 
 Vue.component('pretix-widget-event-week-calendar', {
     template: ('<div class="pretix-widget-event-calendar pretix-widget-event-week-calendar" ref="weekcalendar">'
+        // Back navigation
         + '<div class="pretix-widget-back" v-if="$root.events !== undefined">'
-        + '<a href="#" @click.prevent="back_to_list">&lsaquo; '
+        + '<a href="#" @click.prevent.stop="back_to_list">&lsaquo; '
         + strings['back']
         + '</a>'
         + '</div>'
+
+        // Event header
         + '<div class="pretix-widget-event-header" v-if="$root.parent_stack.length > 0">'
         + '<strong>{{ $root.name }}</strong>'
         + '</div>'
+
+        // Calendar navigation
         + '<div class="pretix-widget-event-description" v-if="$root.parent_stack.length > 0 && $root.frontpage_text" v-html="$root.frontpage_text"></div>'
         + '<div class="pretix-widget-event-calendar-head">'
-        + '<a class="pretix-widget-event-calendar-previous-month" href="#" @click.prevent="prevweek">&laquo; '
+        + '<a class="pretix-widget-event-calendar-previous-month" href="#" @click.prevent.stop="prevweek">&laquo; '
         + strings['previous_week']
         + '</a> '
         + '<strong>{{ weekname }}</strong> '
-        + '<a class="pretix-widget-event-calendar-next-month" href="#" @click.prevent="nextweek">'
+        + '<a class="pretix-widget-event-calendar-next-month" href="#" @click.prevent.stop="nextweek">'
         + strings['next_week']
         + ' &raquo;</a>'
         + '</div>'
+
+        // Actual calendar
         + '<div class="pretix-widget-event-week-table">'
         + '<div class="pretix-widget-event-week-col" v-for="d in $root.days">'
         + '<pretix-widget-event-week-cell :day="d">'
         + '</pretix-widget-event-week-cell>'
         + '</div>'
         + '</div>'
+
         + '</div>'
         + '</div>'),
     computed: {
@@ -1314,7 +1384,7 @@ Vue.component('pretix-widget', {
     },
     computed: {
         classObject: function () {
-            o = {'pretix-widget': true};
+            var o = {'pretix-widget': true};
             if (this.mobile) {
                 o['pretix-widget-mobile'] = true;
             }
@@ -1398,6 +1468,9 @@ var shared_root_methods = {
         if (this.$root.category_filter) {
             url += '&categories=' + encodeURIComponent(this.$root.category_filter);
         }
+        if (this.$root.variation_filter) {
+            url += '&variations=' + encodeURIComponent(this.$root.variation_filter);
+        }
         var cart_id = getCookie(this.cookieName);
         if (this.$root.voucher_code) {
             url += '&voucher=' + encodeURIComponent(this.$root.voucher_code);
@@ -1464,11 +1537,12 @@ var shared_root_methods = {
                 root.error = data.error;
                 root.display_add_to_cart = data.display_add_to_cart;
                 root.waiting_list_enabled = data.waiting_list_enabled;
-                root.show_variations_expanded = data.show_variations_expanded;
+                root.show_variations_expanded = data.show_variations_expanded || !!root.variation_filter;
                 root.cart_id = cart_id;
                 root.cart_exists = data.cart_exists;
                 root.vouchers_exist = data.vouchers_exist;
                 root.has_seating_plan = data.has_seating_plan;
+                root.has_seating_plan_waitinglist = data.has_seating_plan_waitinglist;
                 root.itemnum = data.itemnum;
             }
             root.poweredby = data.poweredby;
@@ -1476,7 +1550,7 @@ var shared_root_methods = {
                 root.loading--;
                 root.trigger_load_callback();
             }
-            if (root.parent_stack.length > 0 && root.has_seating_plan && root.categories.length === 0 && !root.frame_dismissed && root.useIframe && !root.error) {
+            if (root.parent_stack.length > 0 && root.has_seating_plan && root.categories.length === 0 && !root.frame_dismissed && root.useIframe && !root.error && !root.has_seating_plan_waitinglist) {
                 // If we're on desktop and someone selects a seating-only event in a calendar, let's open it right away,
                 // but only if the person didn't close it before.
                 root.startseating()
@@ -1503,6 +1577,9 @@ var shared_root_methods = {
             redirect_url += '/' + this.$root.subevent;
         }
         redirect_url += '/seatingframe/?iframe=1&locale=' + lang;
+        if (this.$root.voucher_code) {
+            redirect_url += '&voucher=' + encodeURIComponent(this.$root.voucher_code);
+        }
         if (this.$root.cart_id) {
             redirect_url += '&take_cart_id=' + this.$root.cart_id;
         }
@@ -1658,13 +1735,14 @@ var create_widget = function (element) {
     }
     var voucher = element.attributes.voucher ? element.attributes.voucher.value : null;
     var subevent = element.attributes.subevent ? element.attributes.subevent.value : null;
-    var style = element.attributes.style ? element.attributes.style.value : null;
+    var style = element.attributes["list-type"] ? element.attributes["list-type"].value : (element.attributes.style ? element.attributes.style.value : null);
     var skip_ssl = element.attributes["skip-ssl-check"] ? true : false;
     var disable_iframe = element.attributes["disable-iframe"] ? true : false;
     var disable_vouchers = element.attributes["disable-vouchers"] ? true : false;
     var widget_data = JSON.parse(JSON.stringify(window.PretixWidget.widget_data));
     var filter = element.attributes.filter ? element.attributes.filter.value : null;
     var items = element.attributes.items ? element.attributes.items.value : null;
+    var variations = element.attributes.variations ? element.attributes.variations.value : null;
     var categories = element.attributes.categories ? element.attributes.categories.value : null;
     for (var i = 0; i < element.attributes.length; i++) {
         var attrib = element.attributes[i];
@@ -1696,10 +1774,11 @@ var create_widget = function (element) {
                 filter: filter,
                 item_filter: items,
                 category_filter: categories,
+                variation_filter: variations,
                 voucher_code: voucher,
                 display_net_prices: false,
                 voucher_explanation_text: null,
-                show_variations_expanded: false,
+                show_variations_expanded: !!variations,
                 skip_ssl: skip_ssl,
                 disable_iframe: disable_iframe,
                 style: style,
@@ -1722,7 +1801,8 @@ var create_widget = function (element) {
                 itemcount: 0,
                 overlay: null,
                 poweredby: "",
-                has_seating_plan: false
+                has_seating_plan: false,
+                has_seating_plan_waitinglist: false,
             }
         },
         created: function () {

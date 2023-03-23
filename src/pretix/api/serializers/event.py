@@ -54,8 +54,12 @@ from pretix.base.models.items import SubEventItem, SubEventItemVariation
 from pretix.base.services.seating import (
     SeatProtected, generate_seats, validate_plan_change,
 )
-from pretix.base.settings import LazyI18nStringList, validate_event_settings
+from pretix.base.settings import (
+    PERSON_NAME_SALUTATIONS, PERSON_NAME_SCHEMES, PERSON_NAME_TITLE_GROUPS,
+    LazyI18nStringList, validate_event_settings,
+)
 from pretix.base.signals import api_event_settings_fields
+from pretix.multidomain.urlreverse import build_absolute_uri
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +165,10 @@ class EventSerializer(I18nAwareModelSerializer):
     timezone = TimeZoneField(required=False, choices=[(a, a) for a in common_timezones])
     valid_keys = ValidKeysField(source='*', read_only=True)
     best_availability_state = serializers.IntegerField(allow_null=True, read_only=True)
+    public_url = serializers.SerializerMethodField('get_event_url', read_only=True)
+
+    def get_event_url(self, event):
+        return build_absolute_uri(event, 'presale:event.index')
 
     class Meta:
         model = Event
@@ -168,7 +176,7 @@ class EventSerializer(I18nAwareModelSerializer):
                   'date_to', 'date_admission', 'is_public', 'presale_start',
                   'presale_end', 'location', 'geo_lat', 'geo_lon', 'has_subevents', 'meta_data', 'seating_plan',
                   'plugins', 'seat_category_mapping', 'timezone', 'item_meta_properties', 'valid_keys',
-                  'sales_channels', 'best_availability_state')
+                  'sales_channels', 'best_availability_state', 'public_url')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -408,7 +416,8 @@ class CloneEventSerializer(EventSerializer):
         has_subevents = validated_data.pop('has_subevents', None)
         tz = validated_data.pop('timezone', None)
         sales_channels = validated_data.pop('sales_channels', None)
-        new_event = super().create(validated_data)
+        date_admission = validated_data.pop('date_admission', None)
+        new_event = super().create({**validated_data, 'plugins': None})
 
         event = Event.objects.filter(slug=self.context['event'], organizer=self.context['organizer'].pk).first()
         new_event.copy_data_from(event)
@@ -423,6 +432,10 @@ class CloneEventSerializer(EventSerializer):
             new_event.sales_channels = sales_channels
         if has_subevents is not None:
             new_event.has_subevents = has_subevents
+        if has_subevents is not None:
+            new_event.has_subevents = has_subevents
+        if date_admission is not None:
+            new_event.date_admission = date_admission
         new_event.save()
         if tz:
             new_event.settings.timezone = tz
@@ -654,6 +667,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'show_times',
         'show_items_outside_presale_period',
         'display_net_prices',
+        'hide_prices_from_attendees',
         'presale_start_show_date',
         'locales',
         'locale',
@@ -679,6 +693,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'frontpage_subevent_ordering',
         'event_list_type',
         'event_list_available_only',
+        'event_calendar_future_only',
         'frontpage_text',
         'event_info_text',
         'attendee_names_asked',
@@ -752,6 +767,9 @@ class EventSettingsSerializer(SettingsSerializer):
         'invoice_logo_image',
         'cancel_allow_user',
         'cancel_allow_user_until',
+        'cancel_allow_user_unpaid_keep',
+        'cancel_allow_user_unpaid_keep_fees',
+        'cancel_allow_user_unpaid_keep_percentage',
         'cancel_allow_user_paid',
         'cancel_allow_user_paid_until',
         'cancel_allow_user_paid_keep',
@@ -762,10 +780,12 @@ class EventSettingsSerializer(SettingsSerializer):
         'cancel_allow_user_paid_adjust_fees_step',
         'cancel_allow_user_paid_refund_as_giftcard',
         'cancel_allow_user_paid_require_approval',
+        'cancel_allow_user_paid_require_approval_fee_unknown',
         'change_allow_user_variation',
         'change_allow_user_addons',
         'change_allow_user_until',
         'change_allow_user_price',
+        'change_allow_attendee',
         'primary_color',
         'theme_color_success',
         'theme_color_danger',
@@ -776,6 +796,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'logo_image_large',
         'logo_show_title',
         'og_image',
+        'name_scheme',
     ]
 
     def __init__(self, *args, **kwargs):
@@ -841,4 +862,25 @@ class DeviceEventSettingsSerializer(EventSettingsSerializer):
         'invoice_address_from_country',
         'invoice_address_from_tax_id',
         'invoice_address_from_vat_id',
+        'name_scheme',
     ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['_name_scheme_fields'] = serializers.JSONField(
+            read_only=True,
+            default=[{"key": k, "label": str(v), "weight": w} for k, v, w, *__ in PERSON_NAME_SCHEMES.get(self.event.settings.name_scheme)['fields']]
+        )
+        self.fields['_name_scheme_salutations'] = serializers.JSONField(
+            read_only=True,
+            default=[{"key": k, "label": str(v)} for k, v in PERSON_NAME_SALUTATIONS]
+        )
+        self.fields['_name_scheme_titles'] = serializers.JSONField(
+            read_only=True,
+            default=(
+                [{"key": k, "label": k}
+                 for k in PERSON_NAME_TITLE_GROUPS.get(self.event.settings.name_scheme_titles)[1]]
+                if self.event.settings.name_scheme_titles
+                else []
+            )
+        )

@@ -113,6 +113,7 @@ class ContactForm(forms.Form):
 class InvoiceAddressForm(BaseInvoiceAddressForm):
     required_css_class = 'required'
     vat_warning = True
+    address_validation = True
 
     def __init__(self, *args, **kwargs):
         allow_save = kwargs.pop('allow_save', False)
@@ -221,15 +222,13 @@ class MembershipForm(forms.Form):
         else:
             types = self.position.item.require_membership_types.all()
 
-        initial = None
-
         memberships = [
             m for m in self.memberships
             if m.is_valid(ev) and m.membership_type in types
         ]
 
         if len(memberships) == 1:
-            initial = str(memberships[0].pk)
+            self.initial['membership'] = str(memberships[0].pk)
 
         self.fields['membership'] = forms.ChoiceField(
             label=_('Membership'),
@@ -237,7 +236,6 @@ class MembershipForm(forms.Form):
                 (str(m.pk), self._label_from_instance(m))
                 for m in memberships
             ],
-            initial=initial,
             widget=forms.RadioSelect,
         )
         self.is_empty = not memberships

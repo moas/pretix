@@ -36,7 +36,7 @@ from django.utils.functional import cached_property
 from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 from django.views import View
-from django.views.generic import CreateView, DeleteView, DetailView, ListView
+from django.views.generic import CreateView, DetailView, ListView
 from reportlab.lib import pagesizes
 from reportlab.pdfgen import canvas
 
@@ -49,6 +49,7 @@ from pretix.helpers.models import modelcopy
 from pretix.plugins.badges.forms import BadgeLayoutForm
 from pretix.plugins.badges.tasks import badges_create_pdf
 
+from ...helpers.compat import CompatDeleteView
 from .models import BadgeLayout
 
 
@@ -142,7 +143,7 @@ class LayoutSetDefault(EventPermissionRequiredMixin, DetailView):
         })
 
 
-class LayoutDelete(EventPermissionRequiredMixin, DeleteView):
+class LayoutDelete(EventPermissionRequiredMixin, CompatDeleteView):
     model = BadgeLayout
     template_name = 'pretixplugins/badges/delete.html'
     permission = 'can_change_event_settings'
@@ -235,7 +236,7 @@ class LayoutEditorView(BaseEditorView):
 class OrderPrintDo(EventPermissionRequiredMixin, AsyncAction, View):
     task = badges_create_pdf
     permission = 'can_view_orders'
-    known_errortypes = ['OrderError']
+    known_errortypes = ['OrderError', 'ExportError']
 
     def get_success_message(self, value):
         return None

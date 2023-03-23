@@ -1,4 +1,4 @@
-FROM python:3.9-bullseye
+FROM python:3.11-bullseye
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -31,7 +31,7 @@ RUN apt-get update && \
     echo 'pretixuser ALL=(ALL) NOPASSWD:SETENV: /usr/bin/supervisord' >> /etc/sudoers && \
     mkdir /static && \
     mkdir /etc/supervisord && \
-	curl -fsSL https://deb.nodesource.com/setup_15.x | sudo -E bash - && \
+	curl -fsSL https://deb.nodesource.com/setup_16.x | sudo -E bash - && \
     apt-get install -y nodejs && \
     curl -qL https://www.npmjs.com/install.sh | sh
 

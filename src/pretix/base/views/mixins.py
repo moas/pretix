@@ -19,6 +19,7 @@
 # You should have received a copy of the GNU Affero General Public License along with this program.  If not, see
 # <https://www.gnu.org/licenses/>.
 #
+import datetime
 import json
 from collections import OrderedDict
 from decimal import Decimal
@@ -28,6 +29,7 @@ from django.core.files.uploadedfile import UploadedFile
 from django.db import IntegrityError
 from django.db.models import Prefetch, QuerySet
 from django.utils.functional import cached_property
+from django.utils.timezone import make_aware
 
 from pretix.base.forms.questions import (
     BaseInvoiceAddressForm, BaseInvoiceNameForm, BaseQuestionsForm,
@@ -43,16 +45,6 @@ from pretix.presale.signals import contact_form_fields_overrides
 class BaseQuestionsViewMixin:
     form_class = BaseQuestionsForm
     all_optional = False
-
-    @staticmethod
-    def _keyfunc(pos):
-        # Sort addons after the item they are an addon to
-        if isinstance(pos, OrderPosition):
-            i = pos.addon_to.positionid if pos.addon_to else pos.positionid
-        else:
-            i = pos.addon_to.pk if pos.addon_to else pos.pk
-        addon_penalty = 1 if pos.addon_to else 0
-        return i, addon_penalty, pos.pk
 
     @cached_property
     def _positions_for_questions(self):
@@ -88,7 +80,7 @@ class BaseQuestionsViewMixin:
             form.pos = cartpos or orderpos
             form.show_copy_answers_to_addon_button = form.pos.addon_to and (
                 set(form.pos.addon_to.item.questions.all()) & set(form.pos.item.questions.all()) or
-                (form.pos.addon_to.item.admission and form.pos.item.admission and (
+                (form.pos.addon_to.item.ask_attendee_data and form.pos.item.ask_attendee_data and (
                     self.request.event.settings.attendee_names_asked or
                     self.request.event.settings.attendee_emails_asked or
                     self.request.event.settings.attendee_company_asked or
@@ -165,6 +157,16 @@ class BaseQuestionsViewMixin:
                         v = v if v != '' else None
                         setattr(form.pos, k, v)
                         setattr(prof, k, v)
+                    elif k == 'requested_valid_from':
+                        if isinstance(v, datetime.datetime):
+                            form.pos.requested_valid_from = v
+                        elif isinstance(v, datetime.date):
+                            form.pos.requested_valid_from = make_aware(datetime.datetime.combine(
+                                v,
+                                datetime.time(hour=0, minute=0, second=0, microsecond=0)
+                            ), self.request.event.timezone)
+                        else:
+                            form.pos.requested_valid_from = None
                     elif k.startswith('question_'):
                         field = form.fields[k]
                         if hasattr(field, 'answer'):

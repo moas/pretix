@@ -35,29 +35,34 @@
 import copy
 import hashlib
 import itertools
+import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
+import unicodedata
 import uuid
 from collections import OrderedDict
 from functools import partial
 from io import BytesIO
 
+import jsonschema
 from arabic_reshaper import ArabicReshaper
 from bidi.algorithm import get_display
 from django.conf import settings
 from django.contrib.staticfiles import finders
+from django.core.exceptions import ValidationError
 from django.db.models import Max, Min
 from django.dispatch import receiver
+from django.utils.deconstruct import deconstructible
 from django.utils.formats import date_format
 from django.utils.functional import SimpleLazyObject
 from django.utils.html import conditional_escape
 from django.utils.timezone import now
-from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_lazy as _, pgettext
 from i18nfield.strings import LazyI18nString
-from PyPDF2 import PdfFileReader
+from pypdf import PdfReader
 from pytz import timezone
 from reportlab.graphics import renderPDF
 from reportlab.graphics.barcode.qr import QrCodeWidget
@@ -251,6 +256,11 @@ DEFAULT_VARIABLES = OrderedDict((
         "editor_sample": _("20:00"),
         "evaluate": lambda op, order, ev: ev.get_time_from_display()
     }),
+    ("event_begin_weekday", {
+        "label": _("Event begin weekday"),
+        "editor_sample": _("Friday"),
+        "evaluate": lambda op, order, ev: ev.get_weekday_from_display()
+    }),
     ("event_end", {
         "label": _("Event end date and time"),
         "editor_sample": _("2017-05-31 22:00"),
@@ -274,6 +284,11 @@ DEFAULT_VARIABLES = OrderedDict((
             ev.date_to.astimezone(timezone(ev.settings.timezone)),
             "TIME_FORMAT"
         ) if ev.date_to else ""
+    }),
+    ("event_end_weekday", {
+        "label": _("Event end weekday"),
+        "editor_sample": _("Friday"),
+        "evaluate": lambda op, order, ev: ev.get_weekday_to_display()
     }),
     ("event_admission", {
         "label": _("Event admission date and time"),
@@ -390,7 +405,55 @@ DEFAULT_VARIABLES = OrderedDict((
         "evaluate": lambda op, order, ev: date_format(
             now().astimezone(timezone(ev.settings.timezone)),
             "TIME_FORMAT"
-        ) if ev.date_admission else ""
+        )
+    }),
+    ("valid_from_date", {
+        "label": _("Validity start date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            now().astimezone(timezone(ev.settings.timezone)),
+            "SHORT_DATE_FORMAT"
+        ) if op.valid_from else ""
+    }),
+    ("valid_from_datetime", {
+        "label": _("Validity start date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_from.astimezone(timezone(ev.settings.timezone)),
+            "SHORT_DATETIME_FORMAT"
+        ) if op.valid_from else ""
+    }),
+    ("valid_from_time", {
+        "label": _("Validity start time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_from.astimezone(timezone(ev.settings.timezone)),
+            "TIME_FORMAT"
+        ) if op.valid_from else ""
+    }),
+    ("valid_until_date", {
+        "label": _("Validity end date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_until.astimezone(timezone(ev.settings.timezone)),
+            "SHORT_DATE_FORMAT"
+        ) if op.valid_until else ""
+    }),
+    ("valid_until_datetime", {
+        "label": _("Validity end date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_until.astimezone(timezone(ev.settings.timezone)),
+            "SHORT_DATETIME_FORMAT"
+        ) if op.valid_until else ""
+    }),
+    ("valid_until_time", {
+        "label": _("Validity end time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_until.astimezone(timezone(ev.settings.timezone)),
+            "TIME_FORMAT"
+        ) if op.valid_until else ""
     }),
     ("seat", {
         "label": _("Seat: Full name"),
@@ -521,12 +584,19 @@ def variables_from_questions(sender, *args, **kwargs):
 
 def _get_attendee_name_part(key, op, order, ev):
     if isinstance(key, tuple):
-        return ' '.join(p for p in [_get_attendee_name_part(c[0], op, order, ev) for c in key] if p)
-    return op.attendee_name_parts.get(key, '')
+        parts = [_get_attendee_name_part(c[0], op, order, ev) for c in key if not (c[0] == 'salutation' and op.attendee_name_parts.get(c[0], '') == "Mx")]
+        return ' '.join(p for p in parts if p)
+    value = op.attendee_name_parts.get(key, '')
+    if key == 'salutation':
+        return pgettext('person_name_salutation', value)
+    return value
 
 
 def _get_ia_name_part(key, op, order, ev):
-    return order.invoice_address.name_parts.get(key, '') if getattr(order, 'invoice_address', None) else ''
+    value = order.invoice_address.name_parts.get(key, '') if getattr(order, 'invoice_address', None) else ''
+    if key == 'salutation' and value:
+        return pgettext('person_name_salutation', value)
+    return value
 
 
 def get_images(event):
@@ -542,6 +612,14 @@ def get_variables(event):
     v = copy.copy(DEFAULT_VARIABLES)
 
     scheme = PERSON_NAME_SCHEMES[event.settings.name_scheme]
+
+    concatenation_for_salutation = scheme.get("concatenation_for_salutation", scheme["concatenation"])
+    v['attendee_name_for_salutation'] = {
+        'label': _("Attendee name for salutation"),
+        'editor_sample': _("Mr Doe"),
+        'evaluate': lambda op, order, ev: concatenation_for_salutation(op.attendee_name_parts or {})
+    }
+
     for key, label, weight in scheme['fields']:
         v['attendee_name_%s' % key] = {
             'label': _("Attendee name: {part}").format(part=label),
@@ -558,6 +636,12 @@ def get_variables(event):
 
     v['invoice_name']['editor_sample'] = scheme['concatenation'](scheme['sample'])
     v['attendee_name']['editor_sample'] = scheme['concatenation'](scheme['sample'])
+
+    v['invoice_name_for_salutation'] = {
+        'label': _("Invoice address name for salutation"),
+        'editor_sample': _("Mr Doe"),
+        'evaluate': lambda op, order, ev: concatenation_for_salutation(order.invoice_address.name_parts if getattr(order, 'invoice_address', None) else {})
+    }
 
     for key, label, weight in scheme['fields']:
         v['invoice_name_%s' % key] = {
@@ -625,7 +709,7 @@ class Renderer:
         self.event = event
         if self.background_file:
             self.bg_bytes = self.background_file.read()
-            self.bg_pdf = PdfFileReader(BytesIO(self.bg_bytes), strict=False)
+            self.bg_pdf = PdfReader(BytesIO(self.bg_bytes), strict=False)
         else:
             self.bg_bytes = None
             self.bg_pdf = None
@@ -693,6 +777,18 @@ class Renderer:
         qr_y = float(o['bottom']) * mm
         renderPDF.draw(d, canvas, qr_x, qr_y)
 
+        # Add QR content + PDF issuer as a hidden string (fully transparent & very very small)
+        # This helps automated processing of the PDF file by 3rd parties, e.g. when checking tickets for resale
+        data = {
+            "issuer": settings.SITE_URL,
+            o.get('content', 'secret'): content
+        }
+        canvas.saveState()
+        canvas.setFont('Open Sans', .01)
+        canvas.setFillColorRGB(0, 0, 0, 0)
+        canvas.drawString(0 * mm, 0 * mm, json.dumps(data, sort_keys=True))
+        canvas.restoreState()
+
     def _get_ev(self, op, order):
         return op.subevent or order.event
 
@@ -708,13 +804,14 @@ class Renderer:
 
         if o['content'] == 'other' or o['content'] == 'other_i18n':
             if o['content'] == 'other_i18n':
-                text = str(LazyI18nString(o['text_i18n']))
+                text = str(LazyI18nString(o.get('text_i18n', {})))
             else:
-                text = o['text']
+                text = o.get('text', '')
 
             def replace(x):
-                print(x.group(1))
                 if x.group(1).startswith('itemmeta:'):
+                    if op.variation_id:
+                        return op.variation.meta_data.get(x.group(1)[9:]) or ''
                     return op.item.meta_data.get(x.group(1)[9:]) or ''
                 elif x.group(1).startswith('meta:'):
                     return ev.meta_data.get(x.group(1)[5:]) or ''
@@ -735,6 +832,8 @@ class Renderer:
             return re.sub(r'\{([a-zA-Z0-9:_]+)\}', replace, text)
 
         elif o['content'].startswith('itemmeta:'):
+            if op.variation_id:
+                return op.variation.meta_data.get(o['content'][9:]) or ''
             return op.item.meta_data.get(o['content'][9:]) or ''
 
         elif o['content'].startswith('meta:'):
@@ -797,23 +896,40 @@ class Renderer:
         if o['italic']:
             font += ' I'
 
+        try:
+            ad = getAscentDescent(font, float(o['fontsize']))
+        except KeyError:  # font not known, fall back
+            logger.warning(f'Use of unknown font "{font}"')
+            font = 'Open Sans'
+            ad = getAscentDescent(font, float(o['fontsize']))
+
         align_map = {
             'left': TA_LEFT,
             'center': TA_CENTER,
             'right': TA_RIGHT
         }
+        # lineheight display differs from browser canvas. This calc is just empirical values to get
+        # reportlab render similarly to browser canvas.
+        # for backwards compatability use „uncorrected“ lineheight of 1.0 instead of 1.15
+        lineheight = float(o['lineheight']) * 1.15 if 'lineheight' in o else 1.0
         style = ParagraphStyle(
             name=uuid.uuid4().hex,
             fontName=font,
             fontSize=float(o['fontsize']),
-            leading=float(o['fontsize']),
-            autoLeading="max",
+            leading=lineheight * float(o['fontsize']),
+            # for backwards compatability use autoLeading if no lineheight is given
+            autoLeading='off' if 'lineheight' in o else 'max',
             textColor=Color(o['color'][0] / 255, o['color'][1] / 255, o['color'][2] / 255),
             alignment=align_map[o['align']]
         )
+        # add an almost-invisible space &hairsp; after hyphens as word-wrap in ReportLab only works on space chars
         text = conditional_escape(
             self._get_text_content(op, order, o) or "",
-        ).replace("\n", "<br/>\n")
+        ).replace("\n", "<br/>\n").replace("-", "-&hairsp;")
+
+        # reportlab does not support unicode combination characters
+        # It's important we do this before we use ArabicReshaper
+        text = unicodedata.normalize("NFKC", text)
 
         # reportlab does not support RTL, ligature-heavy scripts like Arabic. Therefore, we use ArabicReshaper
         # to resolve all ligatures and python-bidi to switch RTL texts.
@@ -825,22 +941,28 @@ class Renderer:
         p = Paragraph(text, style=style)
         w, h = p.wrapOn(canvas, float(o['width']) * mm, 1000 * mm)
         # p_size = p.wrap(float(o['width']) * mm, 1000 * mm)
-        ad = getAscentDescent(font, float(o['fontsize']))
         canvas.saveState()
         # The ascent/descent offsets here are not really proven to be correct, they're just empirical values to get
         # reportlab render similarly to browser canvas.
         if o.get('downward', False):
             canvas.translate(float(o['left']) * mm, float(o['bottom']) * mm)
             canvas.rotate(o.get('rotation', 0) * -1)
-            p.drawOn(canvas, 0, -h - ad[1] / 2)
+            p.drawOn(canvas, 0, -h - ad[1] / 2.5)
         else:
+            if lineheight != 1.0:
+                # lineheight adds to ascent/descent offsets, just empirical values again to get
+                # reportlab to render similarly to browser canvas
+                ad = (
+                    ad[0],
+                    ad[1] + (lineheight - 1.0) * float(o['fontsize']) * 1.05
+                )
             canvas.translate(float(o['left']) * mm, float(o['bottom']) * mm + h)
             canvas.rotate(o.get('rotation', 0) * -1)
             p.drawOn(canvas, 0, -h - ad[1])
         canvas.restoreState()
 
     def draw_page(self, canvas: Canvas, order: Order, op: OrderPosition, show_page=True, only_page=None):
-        page_count = self.bg_pdf.getNumPages()
+        page_count = len(self.bg_pdf.pages)
 
         if not only_page and not show_page:
             raise ValueError("only_page=None and show_page=False cannot be combined")
@@ -860,7 +982,11 @@ class Renderer:
                 elif o['type'] == "poweredby":
                     self._draw_poweredby(canvas, op, o)
                 if self.bg_pdf:
-                    canvas.setPageSize((self.bg_pdf.getPage(page).mediaBox[2], self.bg_pdf.getPage(page).mediaBox[3]))
+                    page_size = (self.bg_pdf.pages[0].mediabox[2], self.bg_pdf.pages[0].mediabox[3])
+                    if self.bg_pdf.pages[0].get('/Rotate') in (90, 270):
+                        # swap dimensions due to pdf being rotated
+                        page_size = page_size[::-1]
+                    canvas.setPageSize(page_size)
             if show_page:
                 canvas.showPage()
 
@@ -884,17 +1010,41 @@ class Renderer:
                 with open(os.path.join(d, 'out.pdf'), 'rb') as f:
                     return BytesIO(f.read())
         else:
-            from PyPDF2 import PdfFileReader, PdfFileWriter
+            from pypdf import PdfReader, PdfWriter, Transformation
+            from pypdf.generic import RectangleObject
             buffer.seek(0)
-            new_pdf = PdfFileReader(buffer)
-            output = PdfFileWriter()
+            new_pdf = PdfReader(buffer)
+            output = PdfWriter()
 
             for i, page in enumerate(new_pdf.pages):
-                bg_page = copy.copy(self.bg_pdf.getPage(i))
-                bg_page.mergePage(page)
-                output.addPage(bg_page)
+                bg_page = copy.copy(self.bg_pdf.pages[i])
+                bg_rotation = bg_page.get('/Rotate')
+                if bg_rotation:
+                    # /Rotate is clockwise, transformation.rotate is counter-clockwise
+                    t = Transformation().rotate(bg_rotation)
+                    w = float(page.mediabox.getWidth())
+                    h = float(page.mediabox.getHeight())
+                    if bg_rotation in (90, 270):
+                        # offset due to rotation base
+                        if bg_rotation == 90:
+                            t = t.translate(h, 0)
+                        else:
+                            t = t.translate(0, w)
+                        # rotate mediabox as well
+                        page.mediabox = RectangleObject((
+                            page.mediabox.left.as_numeric(),
+                            page.mediabox.bottom.as_numeric(),
+                            page.mediabox.top.as_numeric(),
+                            page.mediabox.right.as_numeric(),
+                        ))
+                        page.trimbox = page.mediabox
+                    elif bg_rotation == 180:
+                        t = t.translate(w, h)
+                    page.add_transformation(t)
+                bg_page.merge_page(page)
+                output.add_page(bg_page)
 
-            output.addMetadata({
+            output.add_metadata({
                 '/Title': str(title),
                 '/Creator': 'pretix',
             })
@@ -902,3 +1052,22 @@ class Renderer:
             output.write(outbuffer)
             outbuffer.seek(0)
             return outbuffer
+
+
+@deconstructible
+class PdfLayoutValidator:
+    def __call__(self, value):
+        if not isinstance(value, dict):
+            try:
+                val = json.loads(value)
+            except ValueError:
+                raise ValidationError(_('Your layout file is not a valid JSON file.'))
+        else:
+            val = value
+        with open(finders.find('schema/pdf-layout.schema.json'), 'r') as f:
+            schema = json.loads(f.read())
+        try:
+            jsonschema.validate(val, schema)
+        except jsonschema.ValidationError as e:
+            e = str(e).replace('%', '%%')
+            raise ValidationError(_('Your layout file is not a valid layout. Error message: {}').format(e))

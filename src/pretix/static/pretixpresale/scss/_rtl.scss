@@ -13,6 +13,11 @@ html.rtl {
       margin-right: 0;
       margin-left: 10px;
   }
+  .product-row.variation h5:before {
+    left: auto;
+    right: 1px;
+    border-width: 0 1px 1px 0;
+  }
   .cart-row > div {
     float: right;
   }
@@ -30,12 +35,12 @@ html.rtl {
     padding-right: 20px;
     padding-left: 0;
   }
-  .thank-you .fa {
+  .thank-you > .fa {
     float: right;
     margin-left: 30px;
     margin-right: 0;
   }
-  .thank-you p {
+  .thank-you > * {
     margin-right: 158px;
     margin-left: 0;
   }

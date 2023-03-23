@@ -19,33 +19,70 @@ else
 endif
 
 
-===CHECK=== -down-> "Is the order in status PAID or PENDING\nand is the position not canceled?"
+===CHECK=== -down-> "Is addon_match set to true?"
 --> if "" then
+    -down->[no] "Is the order in status PAID or PENDING\nand is the position not canceled?"
+else
+    -right->[yes] "Build a list that includes the position\nas well as all its add-ons"
+    -down-> "Filter list for products that are part of the check-in list"
+    --> if "" then
+        -down->[one found] Proceed with the matching position
+        --> "Is the order in status PAID or PENDING\nand is the position not canceled?"
+    else
+        --> if "" then
+            -right->[none found] "Return error PRODUCT  "
+        else
+            -down->[multiple found] Return error AMBIGUOUS
+        endif
+    endif
+endif
+
+"Is the order in status PAID or PENDING\nand is the position not canceled?" --> if "" then
     -right->[no] "Return error CANCELED"
 else
-    -down->[yes] "Is the product part of the check-in list?"
+    -down->[yes] "Is one or more block set on the ticket?"
     --> if "" then
-        -right->[no] "Return error PRODUCT"
+        -right->[no] "Return error BLOCKED"
     else
-        -down->[yes] "Is the subevent part of the check-in list?"
+        -down->[yes] "If this is not an exit, is the valid_from/valid_until\nconstraint on the ticket fulfilled?"
         --> if "" then
-            -right->[no] "Return error PRODUCT "
+            -right->[no] "Return error INVALID_TIME"
         else
-            -down->[yes] "Is the order in status PAID\nor is this a forced upload?"
+            -down->[yes] "Is the product part of the check-in list?"
             --> if "" then
-                -right->[no] "Does the check-in list include pending orders?"
+                -right->[no] "Return error PRODUCT"
+            else
+                -down->[yes] "Is the subevent part of the check-in list?"
                 --> if "" then
-                    -right->[no] "Return error UNPAID "
+                    -right->[no] "Return error PRODUCT "
                 else
-                    -down->[yes] "Is ignore_unpaid set?\n(Has the operator confirmed\nthe checkin?)"
+                    -down->[yes] "Is the order in status PAID\nor is this a forced upload?"
                     --> if "" then
-                        -right->[no] "Return error UNPAID "
+                        -right->[no] "Is Order.require_approval set?"
+                        --> if "" then
+                            -->[no] "Is Order.valid_if_pending set?"
+                            --> if "" then
+                                -down->[yes] "Is this an entry or exit?\nIs the upload forced?"
+                            else
+                                -right->[no] "Does the check-in list include pending orders?"
+                                --> if "" then
+                                    -right->[no] "Return error UNPAID "
+                                else
+                                    -down->[yes] "Is ignore_unpaid set on the request?\n(Has the operator confirmed\nthe checkin?)"
+                                    --> if "" then
+                                        -right->[no] "Return error UNPAID "
+                                    else
+                                        -down->[yes] "Is this an entry or exit?\nIs the upload forced?"
+                                    endif
+                                endif
+                            endif
+                        else
+                            -->[yes] "Return error UNPAID "
+                        endif
                     else
                         -down->[yes] "Is this an entry or exit?\nIs the upload forced?"
                     endif
                 endif
-            else
-                -down->[yes] "Is this an entry or exit?\nIs the upload forced?"
             endif
         endif
     endif

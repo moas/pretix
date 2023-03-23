@@ -95,6 +95,8 @@ class Invoice(models.Model):
     :type additional_text: str
     :param payment_provider_text: A payment provider specific text
     :type payment_provider_text: str
+    :param payment_provider_stamp: A payment provider specific stamp
+    :type payment_provider_stamp: str
     :param footer_text: A footer text, displayed smaller and centered on every page
     :type footer_text: str
     :param foreign_currency_display: A different currency that taxes should also be displayed in.
@@ -103,6 +105,8 @@ class Invoice(models.Model):
     :type foreign_currency_rate: Decimal
     :param foreign_currency_rate_date: The date of the foreign currency exchange rates.
     :type foreign_currency_rate_date: date
+    :param foreign_currency_rate_source: The source of the foreign currency rate.
+    :type foreign_currency_rate_source: str
     :param file: The filename of the rendered invoice
     :type file: File
     """
@@ -144,11 +148,13 @@ class Invoice(models.Model):
     additional_text = models.TextField(blank=True)
     reverse_charge = models.BooleanField(default=False)
     payment_provider_text = models.TextField(blank=True)
+    payment_provider_stamp = models.CharField(max_length=100, null=True, blank=True)
     footer_text = models.TextField(blank=True)
 
     foreign_currency_display = models.CharField(max_length=50, null=True, blank=True)
-    foreign_currency_rate = models.DecimalField(decimal_places=4, max_digits=10, null=True, blank=True)
+    foreign_currency_rate = models.DecimalField(decimal_places=4, max_digits=13, null=True, blank=True)
     foreign_currency_rate_date = models.DateField(null=True, blank=True)
+    foreign_currency_source = models.CharField(max_length=100, null=True, blank=True)
 
     shredded = models.BooleanField(default=False)
 
@@ -341,8 +347,8 @@ class InvoiceLine(models.Model):
     invoice = models.ForeignKey('Invoice', related_name='lines', on_delete=models.CASCADE)
     position = models.PositiveIntegerField(default=0)
     description = models.TextField()
-    gross_value = models.DecimalField(max_digits=10, decimal_places=2)
-    tax_value = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    gross_value = models.DecimalField(max_digits=13, decimal_places=2)
+    tax_value = models.DecimalField(max_digits=13, decimal_places=2, default=Decimal('0.00'))
     tax_rate = models.DecimalField(max_digits=7, decimal_places=2, default=Decimal('0.00'))
     tax_name = models.CharField(max_length=190)
     subevent = models.ForeignKey('SubEvent', null=True, blank=True, on_delete=models.PROTECT)

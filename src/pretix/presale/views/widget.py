@@ -41,7 +41,7 @@ from django.template import Context, Engine
 from django.template.loader import get_template
 from django.utils.formats import date_format
 from django.utils.timezone import now
-from django.utils.translation import get_language, gettext
+from django.utils.translation import get_language, gettext, pgettext
 from django.utils.translation.trans_real import DjangoTranslation
 from django.views import View
 from django.views.decorators.cache import cache_page
@@ -54,7 +54,9 @@ from lxml import html
 
 from pretix.base.context import get_powered_by
 from pretix.base.i18n import language
-from pretix.base.models import CartPosition, Event, Quota, SubEvent, Voucher
+from pretix.base.models import (
+    CartPosition, Event, ItemVariation, Quota, SubEvent, Voucher,
+)
 from pretix.base.services.cart import error_messages
 from pretix.base.settings import GlobalSettingsObject
 from pretix.base.templatetags.rich_text import rich_text
@@ -103,6 +105,7 @@ def widget_css(request, **kwargs):
     et = html.fromstring(tpl.render({})).xpath('/html/head/link')[0].attrib['href'].replace(settings.STATIC_URL, '')
     f = finders.find(et)
     resp = FileResponse(open(f, 'rb'), content_type='text/css')
+    resp._csp_ignore = True
     return resp
 
 
@@ -194,6 +197,7 @@ def widget_js(request, lang, **kwargs):
             gs.settings.set('widget_checksum_{}'.format(lang), checksum)
             cache.set('widget_js_data_{}'.format(lang), data, 3600 * 4)
         resp = HttpResponse(data, content_type='text/javascript')
+    resp._csp_ignore = True
     return resp
 
 
@@ -222,9 +226,18 @@ class WidgetAPIProductList(EventListMixin, View):
     def _get_items(self):
         qs = self.request.event.items
         if 'items' in self.request.GET:
-            qs = qs.filter(pk__in=self.request.GET.get('items').split(","))
+            qs = qs.filter(pk__in=[pk.strip() for pk in self.request.GET.get('items').split(",") if pk.strip().isdigit()])
         if 'categories' in self.request.GET:
-            qs = qs.filter(category__pk__in=self.request.GET.get('categories').split(","))
+            qs = qs.filter(category__pk__in=[pk.strip() for pk in self.request.GET.get('categories').split(",") if pk.strip().isdigit()])
+        variation_filter = None
+        if 'variations' in self.request.GET:
+            variation_filter = [int(pk.strip()) for pk in self.request.GET.get('variations').split(",") if pk.strip().isdigit()]
+            qs = qs.filter(
+                pk__in=ItemVariation.objects.filter(
+                    item__event=self.request.event,
+                    pk__in=variation_filter,
+                ).values_list('item_id', flat=True)
+            )
 
         items, display_add_to_cart = get_grouped_items(
             self.request.event,
@@ -232,6 +245,7 @@ class WidgetAPIProductList(EventListMixin, View):
             voucher=self.voucher,
             channel=self.request.sales_channel.identifier,
             base_qs=qs,
+            require_seat=None,
             memberships=(
                 self.request.customer.usable_memberships(
                     for_event=self.subevent or self.request.event,
@@ -241,7 +255,7 @@ class WidgetAPIProductList(EventListMixin, View):
         )
 
         grps = []
-        for cat, g in item_group_by_category(items):
+        for cat, g in item_group_by_category([i for i in items if not i.requires_seat]):
             grps.append({
                 'id': cat.pk if cat else None,
                 'name': str(cat.name) if cat else None,
@@ -260,6 +274,7 @@ class WidgetAPIProductList(EventListMixin, View):
                         'min_price': item.min_price if item.has_variations else None,
                         'max_price': item.max_price if item.has_variations else None,
                         'allow_waitinglist': item.allow_waitinglist,
+                        'mandatory_priced_addons': item.mandatory_priced_addons,
                         'free_price': item.free_price,
                         'avail': [
                             item.cached_availability[0],
@@ -295,13 +310,13 @@ class WidgetAPIProductList(EventListMixin, View):
                                     var.cached_availability[0],
                                     var.cached_availability[1] if item.do_show_quota_left else None
                                 ],
-                            } for var in item.available_variations
+                            } for var in item.available_variations if (not variation_filter or var.id in variation_filter)
                         ]
 
                     } for item in g
                 ]
             })
-        return grps, display_add_to_cart, len(items)
+        return grps, display_add_to_cart, len(items), items
 
     def post_process(self, data):
         data['poweredby'] = get_powered_by(self.request, safelink=False)
@@ -310,6 +325,7 @@ class WidgetAPIProductList(EventListMixin, View):
         self.post_process(data)
         resp = JsonResponse(data)
         resp['Access-Control-Allow-Origin'] = '*'
+        resp._csp_ignore = True
         return resp
 
     def get(self, request, *args, **kwargs):
@@ -355,15 +371,23 @@ class WidgetAPIProductList(EventListMixin, View):
         availability = {}
         if ev.presale_is_running and event.settings.event_list_availability:
             if ev.best_availability_state == Quota.AVAILABILITY_OK:
-                availability['color'] = 'green'
-                availability['text'] = gettext('Book now')
-                availability['reason'] = 'ok'
+                if ev.best_availability_is_low:
+                    availability['color'] = 'green'
+                    availability['text'] = gettext('Few tickets left')
+                    availability['reason'] = 'low'
+                else:
+                    availability['color'] = 'green'
+                    if ev.has_paid_item:
+                        availability['text'] = pgettext('available_event_in_list', 'Buy now')
+                    else:
+                        availability['text'] = gettext('Book now')
+                    availability['reason'] = 'ok'
             elif event.settings.waiting_list_enabled and (ev.best_availability_state is not None and ev.best_availability_state >= 0):
                 availability['color'] = 'orange'
                 availability['text'] = gettext('Waiting list')
                 availability['reason'] = 'waitinglist'
             elif ev.best_availability_state == Quota.AVAILABILITY_RESERVED:
-                availability['color'] = 'orange'
+                availability['color'] = 'red'
                 availability['text'] = gettext('Reserved')
                 availability['reason'] = 'reserved'
             elif ev.best_availability_state is not None and ev.best_availability_state < Quota.AVAILABILITY_RESERVED:
@@ -468,11 +492,15 @@ class WidgetAPIProductList(EventListMixin, View):
 
             data['date'] = date(self.year, self.month, 1)
             if hasattr(self.request, 'event'):
-                tz = pytz.timezone(self.request.event.settings.timezone)
+                tz = self.request.event.timezone
             else:
-                tz = pytz.UTC
+                tz = self.request.organizer.timezone
             before = datetime(self.year, self.month, 1, 0, 0, 0, tzinfo=tz) - timedelta(days=1)
             after = datetime(self.year, self.month, ndays, 0, 0, 0, tzinfo=tz) + timedelta(days=1)
+            if hasattr(self.request, 'event') and self.request.event.settings.event_calendar_future_only:
+                limit_before = min(after, now().astimezone(tz))
+            else:
+                limit_before = before
 
             ebd = defaultdict(list)
 
@@ -483,7 +511,7 @@ class WidgetAPIProductList(EventListMixin, View):
                             event__sales_channels__contains=self.request.sales_channel.identifier
                         ), self.request
                     ),
-                    before, after, ebd, set(), self.request.event,
+                    limit_before, after, ebd, set(), self.request.event,
                     kwargs.get('cart_namespace')
                 )
             else:
@@ -495,7 +523,7 @@ class WidgetAPIProductList(EventListMixin, View):
                             sales_channels__contains=self.request.sales_channel.identifier
                         ), self.request
                     ),
-                    before, after, ebd, timezones
+                    limit_before, after, ebd, timezones
                 )
                 add_subevents_for_days(filter_qs_by_attr(SubEvent.annotated(SubEvent.objects.filter(
                     event__organizer=self.request.organizer,
@@ -504,7 +532,7 @@ class WidgetAPIProductList(EventListMixin, View):
                     event__sales_channels__contains=self.request.sales_channel.identifier
                 ).prefetch_related(
                     'event___settings_objects', 'event__organizer___settings_objects'
-                )), self.request), before, after, ebd, timezones)
+                )), self.request), limit_before, after, ebd, timezones)
 
             data['weeks'] = weeks_for_template(ebd, self.year, self.month)
             for w in data['weeks']:
@@ -516,9 +544,9 @@ class WidgetAPIProductList(EventListMixin, View):
             self._set_week_year()
 
             if hasattr(self.request, 'event'):
-                tz = pytz.timezone(self.request.event.settings.timezone)
+                tz = self.request.event.timezone
             else:
-                tz = pytz.UTC
+                tz = self.request.organizer.timezone
 
             week = isoweek.Week(self.year, self.week)
             data['week'] = [self.year, self.week]
@@ -529,11 +557,16 @@ class WidgetAPIProductList(EventListMixin, View):
                 week.sunday().year, week.sunday().month, week.sunday().day, 0, 0, 0, tzinfo=tz
             ) + timedelta(days=1)
 
+            if hasattr(self.request, 'event') and self.request.event.settings.event_calendar_future_only:
+                limit_before = now().astimezone(tz)
+            else:
+                limit_before = before
+
             ebd = defaultdict(list)
             if hasattr(self.request, 'event'):
                 add_subevents_for_days(
                     filter_qs_by_attr(self.request.event.subevents_annotated('web'), self.request),
-                    before, after, ebd, set(), self.request.event,
+                    limit_before, after, ebd, set(), self.request.event,
                     kwargs.get('cart_namespace')
                 )
             else:
@@ -541,7 +574,7 @@ class WidgetAPIProductList(EventListMixin, View):
                 add_events_for_days(
                     self.request,
                     filter_qs_by_attr(Event.annotated(self.request.organizer.events, 'web'), self.request),
-                    before, after, ebd, timezones
+                    limit_before, after, ebd, timezones
                 )
                 add_subevents_for_days(filter_qs_by_attr(SubEvent.annotated(SubEvent.objects.filter(
                     event__organizer=self.request.organizer,
@@ -549,7 +582,7 @@ class WidgetAPIProductList(EventListMixin, View):
                     event__live=True,
                 ).prefetch_related(
                     'event___settings_objects', 'event__organizer___settings_objects'
-                )), self.request), before, after, ebd, timezones)
+                )), self.request), limit_before, after, ebd, timezones)
 
             data['days'] = days_for_template(ebd, week)
             for d in data['days']:
@@ -558,9 +591,8 @@ class WidgetAPIProductList(EventListMixin, View):
             offset = int(self.request.GET.get("offset", 0))
             limit = 50
             if hasattr(self.request, 'event'):
-                evs = self.request.event.subevents_sorted(
-                    filter_qs_by_attr(self.request.event.subevents_annotated(self.request.sales_channel.identifier), self.request)
-                )
+                evs = filter_qs_by_attr(self.request.event.subevents_annotated(self.request.sales_channel.identifier), self.request)
+                evs = self.request.event.subevents_sorted(evs)
                 ordering = self.request.event.settings.get('frontpage_subevent_ordering', default='date_ascending', as_type=str)
                 data['has_more_events'] = False
                 if ordering in ("date_ascending", "date_descending"):
@@ -570,7 +602,7 @@ class WidgetAPIProductList(EventListMixin, View):
                         data['has_more_events'] = True
                         evs = evs[:limit]
 
-                tz = pytz.timezone(request.event.settings.timezone)
+                tz = request.event.timezone
                 if self.request.event.settings.event_list_available_only:
                     evs = [
                         se for se in evs
@@ -638,7 +670,7 @@ class WidgetAPIProductList(EventListMixin, View):
             'display_net_prices': request.event.settings.display_net_prices,
             'show_variations_expanded': request.event.settings.show_variations_expanded,
             'waiting_list_enabled': request.event.settings.waiting_list_enabled,
-            'voucher_explanation_text': str(request.event.settings.voucher_explanation_text),
+            'voucher_explanation_text': str(rich_text(request.event.settings.voucher_explanation_text, safelinks=False)),
             'error': None,
             'cart_exists': False
         }
@@ -660,14 +692,14 @@ class WidgetAPIProductList(EventListMixin, View):
                 if request.event.settings.presale_has_ended_text:
                     data['error'] = str(request.event.settings.presale_has_ended_text)
                 else:
-                    data['error'] = gettext('The presale period for this event is over.')
+                    data['error'] = gettext('The booking period for this event is over.')
             elif request.event.settings.presale_start_show_date:
-                data['error'] = gettext('The presale for this event will start on %(date)s at %(time)s.') % {
+                data['error'] = gettext('The booking period for this event will start on %(date)s at %(time)s.') % {
                     'date': date_format(ev.effective_presale_start.astimezone(request.event.timezone), "SHORT_DATE_FORMAT"),
                     'time': date_format(ev.effective_presale_start.astimezone(request.event.timezone), "TIME_FORMAT"),
                 }
             else:
-                data['error'] = gettext('The presale for this event has not yet started.')
+                data['error'] = gettext('The booking period for this event has not yet started.')
 
         self.voucher = None
         if 'voucher' in request.GET:
@@ -700,14 +732,30 @@ class WidgetAPIProductList(EventListMixin, View):
                 fail = True
 
         if not fail and (ev.presale_is_running or request.event.settings.show_items_outside_presale_period):
-            data['items_by_category'], data['display_add_to_cart'], data['itemnum'] = self._get_items()
+            data['items_by_category'], data['display_add_to_cart'], data['itemnum'], items = self._get_items()
             data['display_add_to_cart'] = data['display_add_to_cart'] and ev.presale_is_running
         else:
+            items = []
             data['items_by_category'] = []
             data['display_add_to_cart'] = False
             data['itemnum'] = 0
 
         data['has_seating_plan'] = ev.seating_plan is not None
+        data['has_seating_plan_waitinglist'] = False
+        if request.event.settings.waiting_list_enabled and ev.presale_is_running:
+            for i in items:
+                if not i.allow_waitinglist or not i.requires_seat:
+                    continue
+
+                if i.has_variations:
+                    for v in i.available_variations:
+                        if v.cached_availability[0] != Quota.AVAILABILITY_OK:
+                            data['has_seating_plan_waitinglist'] = True
+                            break
+                else:
+                    if i.cached_availability[0] != Quota.AVAILABILITY_OK:
+                        data['has_seating_plan_waitinglist'] = True
+                        break
 
         vouchers_exist = self.request.event.get_cache().get('vouchers_exist')
         if vouchers_exist is None:

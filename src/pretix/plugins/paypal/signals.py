@@ -19,17 +19,10 @@
 # You should have received a copy of the GNU Affero General Public License along with this program.  If not, see
 # <https://www.gnu.org/licenses/>.
 #
-import json
-from collections import OrderedDict
 
-from django import forms
 from django.dispatch import receiver
-from django.utils.translation import gettext_lazy as _
 
-from pretix.base.forms import SecretKeySettingsField
-from pretix.base.signals import (
-    logentry_display, register_global_settings, register_payment_providers,
-)
+from pretix.base.signals import logentry_display, register_payment_providers
 
 
 @receiver(register_payment_providers, dispatch_uid="payment_paypal")
@@ -40,46 +33,6 @@ def register_payment_provider(sender, **kwargs):
 
 @receiver(signal=logentry_display, dispatch_uid="paypal_logentry_display")
 def pretixcontrol_logentry_display(sender, logentry, **kwargs):
-    if logentry.action_type != 'pretix.plugins.paypal.event':
-        return
+    from pretix.plugins.paypal2.signals import pretixcontrol_logentry_display
 
-    data = json.loads(logentry.data)
-    event_type = data.get('event_type')
-    text = None
-    plains = {
-        'PAYMENT.SALE.COMPLETED': _('Payment completed.'),
-        'PAYMENT.SALE.DENIED': _('Payment denied.'),
-        'PAYMENT.SALE.REFUNDED': _('Payment refunded.'),
-        'PAYMENT.SALE.REVERSED': _('Payment reversed.'),
-        'PAYMENT.SALE.PENDING': _('Payment pending.'),
-    }
-
-    if event_type in plains:
-        text = plains[event_type]
-    else:
-        text = event_type
-
-    if text:
-        return _('PayPal reported an event: {}').format(text)
-
-
-@receiver(register_global_settings, dispatch_uid='paypal_global_settings')
-def register_global_settings(sender, **kwargs):
-    return OrderedDict([
-        ('payment_paypal_connect_client_id', forms.CharField(
-            label=_('PayPal Connect: Client ID'),
-            required=False,
-        )),
-        ('payment_paypal_connect_secret_key', SecretKeySettingsField(
-            label=_('PayPal Connect: Secret key'),
-            required=False,
-        )),
-        ('payment_paypal_connect_endpoint', forms.ChoiceField(
-            label=_('PayPal Connect Endpoint'),
-            initial='live',
-            choices=(
-                ('live', 'Live'),
-                ('sandbox', 'Sandbox'),
-            ),
-        )),
-    ])
+    return pretixcontrol_logentry_display(sender, logentry, **kwargs)

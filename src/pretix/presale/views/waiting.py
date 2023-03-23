@@ -80,7 +80,7 @@ class WaitingView(EventViewMixin, FormView):
             r = render(request, 'pretixpresale/event/cookies.html', {
                 'url': eventreverse(
                     request.event, "presale:event.waitinglist", kwargs={'cart_namespace': kwargs.get('cart_namespace')}
-                ) + '?' + url_replace(request, 'require_cookie', '', 'iframe', '')
+                ) + '?' + url_replace(request, 'require_cookie', '', 'iframe', '', 'locale', request.GET.get('locale', get_language_without_region()))
             })
             r._csp_ignore = True
             return r
@@ -95,11 +95,11 @@ class WaitingView(EventViewMixin, FormView):
             return redirect(self.get_index_url())
 
         if self.request.event.presale_has_ended:
-            messages.error(request, _("The presale period for this event is over."))
+            messages.error(request, _("The booking period for this event is over."))
             return redirect(self.get_index_url())
 
         if not self.request.event.presale_is_running:
-            messages.error(request, _("The presale for this event has not yet started."))
+            messages.error(request, _("The booking period for this event has not yet started."))
             return redirect(self.get_index_url())
 
         self.subevent = None

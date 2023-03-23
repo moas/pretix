@@ -29,8 +29,8 @@ from oauth2_provider.generators import (
     generate_client_id, generate_client_secret,
 )
 from oauth2_provider.models import (
-    AbstractAccessToken, AbstractApplication, AbstractGrant,
-    AbstractRefreshToken,
+    AbstractAccessToken, AbstractApplication, AbstractGrant, AbstractIDToken,
+    AbstractRefreshToken, ClientSecretField,
 )
 from oauth2_provider.validators import URIValidator
 
@@ -46,7 +46,7 @@ class OAuthApplication(AbstractApplication):
         verbose_name=_("Client ID"),
         max_length=100, unique=True, default=generate_client_id, db_index=True
     )
-    client_secret = models.CharField(
+    client_secret = ClientSecretField(
         verbose_name=_("Client secret"),
         max_length=255, blank=False, default=generate_client_secret, db_index=True
     )
@@ -67,11 +67,25 @@ class OAuthGrant(AbstractGrant):
     redirect_uri = models.CharField(max_length=2500)  # Only 255 in AbstractGrant, which caused problems
 
 
+class OAuthIDToken(AbstractIDToken):
+    application = models.ForeignKey(
+        OAuthApplication, on_delete=models.CASCADE,
+    )
+    organizers = models.ManyToManyField('pretixbase.Organizer')
+
+
 class OAuthAccessToken(AbstractAccessToken):
     source_refresh_token = models.OneToOneField(
         # unique=True implied by the OneToOneField
         'OAuthRefreshToken', on_delete=models.SET_NULL, blank=True, null=True,
         related_name="refreshed_access_token"
+    )
+    id_token = models.OneToOneField(
+        OAuthIDToken,
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name="access_token",
     )
     application = models.ForeignKey(
         OAuthApplication, on_delete=models.CASCADE, blank=True, null=True,
@@ -98,6 +112,7 @@ class WebHook(models.Model):
     target_url = models.URLField(verbose_name=_("Target URL"), max_length=255)
     all_events = models.BooleanField(default=True, verbose_name=_("All events (including newly created ones)"))
     limit_events = models.ManyToManyField('pretixbase.Event', verbose_name=_("Limit to events"), blank=True)
+    comment = models.CharField(verbose_name=_("Comment"), max_length=255, null=True, blank=True)
 
     class Meta:
         ordering = ('id',)
@@ -131,6 +146,18 @@ class WebHookCall(models.Model):
 
     class Meta:
         ordering = ("-datetime",)
+
+
+class WebHookCallRetry(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    webhook = models.ForeignKey('WebHook', on_delete=models.CASCADE, related_name='retries')
+    logentry = models.ForeignKey('pretixbase.LogEntry', on_delete=models.CASCADE, related_name='webhook_retries')
+    retry_not_before = models.DateTimeField(auto_now_add=True)
+    retry_count = models.PositiveIntegerField(default=0)
+    action_type = models.CharField(max_length=255)
+
+    class Meta:
+        unique_together = (('webhook', 'logentry'),)
 
 
 class ApiCall(models.Model):

@@ -23,6 +23,7 @@ from ..settings import GlobalSettingsObject_SettingsStore
 from .auth import U2FDevice, User, WebAuthnDevice
 from .base import CachedFile, LoggedModel, cachedfile_name
 from .checkin import Checkin, CheckinList
+from .currencies import ExchangeRate
 from .customers import Customer
 from .devices import Device, Gate
 from .discount import Discount
@@ -30,12 +31,13 @@ from .event import (
     Event, Event_SettingsStore, EventLock, EventMetaProperty, EventMetaValue,
     SubEvent, SubEventMetaValue, generate_invite_token,
 )
+from .exports import ScheduledEventExport, ScheduledOrganizerExport
 from .giftcards import GiftCard, GiftCardAcceptance, GiftCardTransaction
 from .invoices import Invoice, InvoiceLine, invoice_filename
 from .items import (
     Item, ItemAddOn, ItemBundle, ItemCategory, ItemMetaProperty, ItemMetaValue,
-    ItemVariation, Question, QuestionOption, Quota, SubEventItem,
-    SubEventItemVariation, itempicture_upload_to,
+    ItemVariation, ItemVariationMetaValue, Question, QuestionOption, Quota,
+    SubEventItem, SubEventItemVariation, itempicture_upload_to,
 )
 from .log import LogEntry
 from .memberships import Membership, MembershipType

@@ -51,14 +51,15 @@ from django.utils.translation import gettext as __, gettext_lazy as _
 from i18nfield.strings import LazyI18nString
 from paypalrestsdk.exceptions import BadRequest, UnauthorizedAccess
 from paypalrestsdk.openid_connect import Tokeninfo
+from requests import RequestException
 
 from pretix.base.decimal import round_decimal
 from pretix.base.models import Event, Order, OrderPayment, OrderRefund, Quota
 from pretix.base.payment import BasePaymentProvider, PaymentException
 from pretix.base.services.mail import SendMailException
 from pretix.base.settings import SettingsSandbox
-from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
+from pretix.plugins.paypal.api import Api
 from pretix.plugins.paypal.models import ReferencedPayPalObject
 
 logger = logging.getLogger('pretix.plugins.paypal')
@@ -171,16 +172,10 @@ class Paypal(BasePaymentProvider):
         if self.settings.connect_client_id and not self.settings.secret:
             # Use PayPal connect
             if not self.settings.connect_user_id:
-                settings_content = (
-                    "<p>{}</p>"
-                    "<a href='{}' class='btn btn-primary btn-lg'>{}</a>"
-                ).format(
-                    _('To accept payments via PayPal, you will need an account at PayPal. By clicking on the '
-                      'following button, you can either create a new PayPal account connect pretix to an existing '
-                      'one.'),
-                    self.get_connect_url(request),
-                    _('Connect with {icon} PayPal').format(icon='<i class="fa fa-paypal"></i>')
-                )
+                # Migrate User to PayPal v2
+                self.event.disable_plugin("pretix.plugins.paypal")
+                self.event.enable_plugin("pretix.plugins.paypal2")
+                self.event.save()
             else:
                 settings_content = (
                     "<button formaction='{}' class='btn btn-danger'>{}</button>"
@@ -192,29 +187,10 @@ class Paypal(BasePaymentProvider):
                     _('Disconnect from PayPal')
                 )
         else:
-            settings_content = "<div class='alert alert-info'>%s<br /><code>%s</code></div>" % (
-                _('Please configure a PayPal Webhook to the following endpoint in order to automatically cancel orders '
-                  'when payments are refunded externally.'),
-                build_global_uri('plugins:paypal:webhook')
-            )
-
-        if self.event.currency not in SUPPORTED_CURRENCIES:
-            settings_content += (
-                '<br><br><div class="alert alert-warning">%s '
-                '<a href="https://developer.paypal.com/docs/api/reference/currency-codes/">%s</a>'
-                '</div>'
-            ) % (
-                _("PayPal does not process payments in your event's currency."),
-                _("Please check this PayPal page for a complete list of supported currencies.")
-            )
-
-        if self.event.currency in LOCAL_ONLY_CURRENCIES:
-            settings_content += '<br><br><div class="alert alert-warning">%s''</div>' % (
-                _("Your event's currency is supported by PayPal as a payment and balance currency for in-country "
-                  "accounts only. This means, that the receiving as well as the sending PayPal account must have been "
-                  "created in the same country and use the same currency. Out of country accounts will not be able to "
-                  "send any payments.")
-            )
+            # Migrate User to PayPal v2
+            self.event.disable_plugin("pretix.plugins.paypal")
+            self.event.enable_plugin("pretix.plugins.paypal2")
+            self.event.save()
 
         return settings_content
 
@@ -223,18 +199,19 @@ class Paypal(BasePaymentProvider):
 
     def init_api(self):
         if self.settings.connect_client_id and not self.settings.secret:
-            paypalrestsdk.set_config(
+            paypalrestsdk.api.__api__ = Api(
                 mode="sandbox" if "sandbox" in self.settings.connect_endpoint else 'live',
                 client_id=self.settings.connect_client_id,
                 client_secret=self.settings.connect_secret_key,
                 openid_client_id=self.settings.connect_client_id,
-                openid_client_secret=self.settings.connect_secret_key,
-                openid_redirect_uri=urllib.parse.quote(build_global_uri('plugins:paypal:oauth.return')))
+                openid_client_secret=self.settings.connect_secret_key
+            )
         else:
-            paypalrestsdk.set_config(
+            paypalrestsdk.api.__api__ = Api(
                 mode="sandbox" if "sandbox" in self.settings.get('endpoint') else 'live',
                 client_id=self.settings.get('client_id'),
-                client_secret=self.settings.get('secret'))
+                client_secret=self.settings.get('secret')
+            )
 
     def payment_is_valid_session(self, request):
         return (request.session.get('payment_paypal_id', '') != ''
@@ -447,6 +424,9 @@ class Paypal(BasePaymentProvider):
             except paypalrestsdk.exceptions.ConnectionError as e:
                 messages.error(request, _('We had trouble communicating with PayPal'))
                 logger.exception('Error on creating payment: ' + str(e))
+            except RequestException as e:
+                messages.error(request, _('We had trouble communicating with PayPal'))
+                logger.exception('Error on creating payment: ' + str(e))
 
         for trans in payment.transactions:
             for rr in trans.related_resources:
@@ -492,9 +472,12 @@ class Paypal(BasePaymentProvider):
     def payment_pending_render(self, request, payment) -> str:
         retry = True
         try:
-            if payment.info and payment.info_data['state'] == 'pending':
+            if (
+                    payment.info
+                    and payment.info_data['transactions'][0]['related_resources'][0]['sale']['state'] == 'pending'
+            ):
                 retry = False
-        except KeyError:
+        except (KeyError, IndexError):
             pass
         template = get_template('pretixplugins/paypal/pending.html')
         ctx = {'request': request, 'event': self.event, 'settings': self.settings,

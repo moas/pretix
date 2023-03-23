@@ -151,16 +151,19 @@ class BaseDataShredder:
 
 def shred_log_fields(logentry, banlist=None, whitelist=None):
     d = logentry.parsed_data
+    shredded = False
     if whitelist:
         for k, v in d.items():
             if k not in whitelist:
                 d[k] = '█'
+                shredded = True
     elif banlist:
         for f in banlist:
             if f in d:
                 d[f] = '█'
+                shredded = True
     logentry.data = json.dumps(d)
-    logentry.shredded = True
+    logentry.shredded = logentry.shredded or shredded
     logentry.save(update_fields=['data', 'shredded'])
 
 
@@ -218,8 +221,10 @@ class EmailAddressShredder(BaseDataShredder):
                 o.meta_info = json.dumps(d)
             o.save(update_fields=['meta_info', 'email', 'customer'])
 
-        for le in self.event.logentry_set.filter(action_type__contains="order.email"):
-            shred_log_fields(le, banlist=['recipient', 'message', 'subject'])
+        for le in self.event.logentry_set.filter(
+            Q(action_type__contains="order.email") | Q(action_type__contains="position.email"),
+        ):
+            shred_log_fields(le, banlist=['recipient', 'message', 'subject', 'full_mail'])
 
         for le in self.event.logentry_set.filter(action_type="pretix.event.order.contact.changed"):
             shred_log_fields(le, banlist=['old_email', 'new_email'])
@@ -378,9 +383,10 @@ class QuestionAnswerShredder(BaseDataShredder):
             d = le.parsed_data
             if 'data' in d:
                 for i, row in enumerate(d['data']):
-                    for f in row:
-                        if f not in ('attendee_name', 'attendee_email'):
-                            d['data'][i][f] = '█'
+                    if isinstance(d['data'], list):
+                        for f in row:
+                            if f not in ('attendee_name', 'attendee_email'):
+                                d['data'][i][f] = '█'
                 le.data = json.dumps(d)
                 le.shredded = True
                 le.save(update_fields=['data', 'shredded'])

@@ -17,11 +17,17 @@ Field                                 Type                       Description
 name                                  string                     The organizer's full name, i.e. the name of an
                                                                  organization or company.
 slug                                  string                     A short form of the name, used e.g. in URLs.
+public_url                            string                     The public, customer-facing URL of the organizer, where
+                                                                 the list of all events can be found (read-only).
 ===================================== ========================== =======================================================
 
 
 Endpoints
 ---------
+
+.. versionchanged:: 4.17
+
+    The ``public_url`` field has been added.
 
 .. http:get:: /api/v1/organizers/
 
@@ -51,6 +57,7 @@ Endpoints
           {
             "name": "Big Events LLC",
             "slug": "Big Events",
+            "public_url": "https://pretix.eu/bigevents/"
           }
         ]
       }
@@ -84,6 +91,7 @@ Endpoints
       {
         "name": "Big Events LLC",
         "slug": "Big Events",
+        "public_url": "https://pretix.eu/bigevents/"
       }
 
    :param organizer: The ``slug`` field of the organizer to fetch
@@ -108,10 +116,6 @@ information about the properties.
 
 .. warning:: This API is intended for advanced users. Even though we take care to validate your input, you will be
              able to break your shops using this API by creating situations of conflicting settings. Please take care.
-
-.. versionchanged:: 3.14
-
-   Initial support for settings has been added to the API.
 
 .. http:get:: /api/v1/organizers/(organizer)/settings/
 

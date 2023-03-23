@@ -36,13 +36,17 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Exists, F, Max, OuterRef, Q, Subquery
+from django.db.models import (
+    Count, Exists, F, Max, OuterRef, Q, Subquery, Value, Window,
+)
+from django.db.models.expressions import RawSQL
 from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django_scopes import ScopedManager, scopes_disabled
 
 from pretix.base.models import LoggedModel
 from pretix.base.models.fields import MultiStringField
+from pretix.helpers import PostgresWindowFrame
 
 
 class CheckinList(LoggedModel):
@@ -51,11 +55,22 @@ class CheckinList(LoggedModel):
     all_products = models.BooleanField(default=True, verbose_name=_("All products (including newly created ones)"))
     limit_products = models.ManyToManyField('Item', verbose_name=_("Limit to products"), blank=True)
     subevent = models.ForeignKey('SubEvent', null=True, blank=True,
-                                 verbose_name=pgettext_lazy('subevent', 'Date'), on_delete=models.CASCADE)
+                                 verbose_name=pgettext_lazy('subevent', 'Date'),
+                                 on_delete=models.CASCADE,
+                                 help_text=_('If you choose "all dates", tickets will be considered part of this list '
+                                             'and valid for check-in regardless of which date they are purchased for. '
+                                             'You can limit their validity through the advanced check-in rules, '
+                                             'though.'))
     include_pending = models.BooleanField(verbose_name=pgettext_lazy('checkin', 'Include pending orders'),
                                           default=False,
                                           help_text=_('With this option, people will be able to check in even if the '
                                                       'order has not been paid.'))
+    addon_match = models.BooleanField(
+        verbose_name=_('Allow checking in add-on tickets by scanning the main ticket'),
+        default=False,
+        help_text=_('A scan will only be possible if the check-in list is configured such that there is always exactly '
+                    'one matching add-on ticket. Ambiguous scans will be rejected..')
+    )
     gates = models.ManyToManyField(
         'Gate', verbose_name=_("Gates"), blank=True,
         help_text=_("Does not have any effect for the validation of tickets, only for the automatic configuration of "
@@ -87,17 +102,24 @@ class CheckinList(LoggedModel):
     objects = ScopedManager(organizer='event__organizer')
 
     class Meta:
-        ordering = ('subevent__date_from', 'name')
+        ordering = ('subevent__date_from', 'name', 'pk')
 
-    @property
-    def positions(self):
+    def positions_query(self, ignore_status=False):
         from . import Order, OrderPosition
 
-        qs = OrderPosition.objects.filter(
+        qs = OrderPosition.all.filter(
             order__event=self.event,
-            order__status__in=[Order.STATUS_PAID, Order.STATUS_PENDING] if self.include_pending else [
-                Order.STATUS_PAID],
         )
+        if not ignore_status:
+            if self.include_pending:
+                qs = qs.filter(order__status__in=[Order.STATUS_PAID, Order.STATUS_PENDING], canceled=False)
+            else:
+                qs = qs.filter(
+                    Q(order__status=Order.STATUS_PAID) |
+                    Q(order__status=Order.STATUS_PENDING, order__valid_if_pending=True),
+                    canceled=False
+                )
+
         if self.subevent_id:
             qs = qs.filter(subevent_id=self.subevent_id)
         if not self.all_products:
@@ -105,36 +127,90 @@ class CheckinList(LoggedModel):
         return qs
 
     @property
-    def positions_inside(self):
-        return self.positions.annotate(
-            last_entry=Subquery(
-                Checkin.objects.filter(
-                    position_id=OuterRef('pk'),
-                    list_id=self.pk,
-                    type=Checkin.TYPE_ENTRY,
-                ).order_by().values('position_id').annotate(
-                    m=Max('datetime')
-                ).values('m')
-            ),
-            last_exit=Subquery(
-                Checkin.objects.filter(
-                    position_id=OuterRef('pk'),
-                    list_id=self.pk,
-                    type=Checkin.TYPE_EXIT,
-                ).order_by().values('position_id').annotate(
-                    m=Max('datetime')
-                ).values('m')
-            ),
-        ).filter(
-            Q(last_entry__isnull=False)
-            & Q(
-                Q(last_exit__isnull=True) | Q(last_exit__lt=F('last_entry'))
+    def positions(self):
+        return self.positions_query(ignore_status=False)
+
+    @scopes_disabled()
+    def positions_inside_query(self, ignore_status=False, at_time=None):
+        if at_time is None:
+            c_q = []
+        else:
+            c_q = [Q(datetime__lt=at_time)]
+
+        if "postgresql" not in settings.DATABASES["default"]["ENGINE"]:
+            # Use a simple approach that works on all databases
+            qs = self.positions_query(ignore_status=ignore_status).annotate(
+                last_entry=Subquery(
+                    Checkin.objects.filter(
+                        *c_q,
+                        position_id=OuterRef('pk'),
+                        list_id=self.pk,
+                        type=Checkin.TYPE_ENTRY,
+                    ).order_by().values('position_id').annotate(
+                        m=Max('datetime')
+                    ).values('m')
+                ),
+                last_exit=Subquery(
+                    Checkin.objects.filter(
+                        *c_q,
+                        position_id=OuterRef('pk'),
+                        list_id=self.pk,
+                        type=Checkin.TYPE_EXIT,
+                    ).order_by().values('position_id').annotate(
+                        m=Max('datetime')
+                    ).values('m')
+                ),
+            ).filter(
+                Q(last_entry__isnull=False)
+                & Q(
+                    Q(last_exit__isnull=True) | Q(last_exit__lt=F('last_entry'))
+                )
+            )
+            return qs
+
+        # Use the PostgreSQL-specific query using Window functions, which is a lot faster.
+        # On a real-world example with ~100k tickets, of which ~17k are checked in, we observed
+        # a speed-up from 29s (old) to a few hundred milliseconds (new)!
+        # Why is this so much faster? The regular query get's PostgreSQL all busy with filtering
+        # the tickets both by their belonging the event and checkin status at the same time, while
+        # this query just iterates over all successful checkins on the list, and -- by the power
+        # of window functions -- asks "is this an entry that is followed by no exit?". Then we
+        # dedupliate by position and count it up.
+        cl = self
+        base_q, base_params = (
+            Checkin.all.filter(*c_q, successful=True, list=cl)
+            .annotate(
+                cnt_exists_after=Window(
+                    expression=Count("position_id", filter=Q(type=Value("exit"))),
+                    partition_by=[F("position_id"), F("list_id")],
+                    order_by=F("datetime").asc(),
+                    frame=PostgresWindowFrame(
+                        "ROWS", start="1 following", end="unbounded following"
+                    ),
+                )
+            )
+            .values("position_id", "type", "datetime", "cnt_exists_after")
+            .query.sql_with_params()
+        )
+        return self.positions_query(ignore_status=ignore_status).filter(
+            pk__in=RawSQL(
+                f"""
+                SELECT "position_id"
+                FROM ({str(base_q)}) s
+                WHERE "type" = %s AND "cnt_exists_after" = 0
+                GROUP BY "position_id"
+                """,
+                [*base_params, Checkin.TYPE_ENTRY]
             )
         )
 
     @property
+    def positions_inside(self):
+        return self.positions_inside_query(None)
+
+    @property
     def inside_count(self):
-        return self.positions_inside.count()
+        return self.positions_inside_query(None).count()
 
     @property
     @scopes_disabled()
@@ -258,7 +334,10 @@ class Checkin(models.Model):
     REASON_REVOKED = 'revoked'
     REASON_INCOMPLETE = 'incomplete'
     REASON_ALREADY_REDEEMED = 'already_redeemed'
+    REASON_AMBIGUOUS = 'ambiguous'
     REASON_ERROR = 'error'
+    REASON_BLOCKED = 'blocked'
+    REASON_INVALID_TIME = 'invalid_time'
     REASONS = (
         (REASON_CANCELED, _('Order canceled')),
         (REASON_INVALID, _('Unknown ticket')),
@@ -268,7 +347,10 @@ class Checkin(models.Model):
         (REASON_INCOMPLETE, _('Information required')),
         (REASON_ALREADY_REDEEMED, _('Ticket already used')),
         (REASON_PRODUCT, _('Ticket type not allowed here')),
+        (REASON_AMBIGUOUS, _('Ticket code is ambiguous on list')),
         (REASON_ERROR, _('Server error')),
+        (REASON_BLOCKED, _('Ticket blocked')),
+        (REASON_INVALID_TIME, _('Ticket not valid at this time')),
     )
 
     successful = models.BooleanField(
@@ -326,7 +408,13 @@ class Checkin(models.Model):
     type = models.CharField(max_length=100, choices=CHECKIN_TYPES, default=TYPE_ENTRY)
 
     nonce = models.CharField(max_length=190, null=True, blank=True)
+
+    # Whether or not the scan was made offline
+    force_sent = models.BooleanField(default=False, null=True, blank=True)
+
+    # Whether the scan was made offline AND would have not been possible online
     forced = models.BooleanField(default=False)
+
     device = models.ForeignKey(
         'pretixbase.Device', related_name='checkins', on_delete=models.PROTECT, null=True, blank=True
     )

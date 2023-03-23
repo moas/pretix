@@ -23,6 +23,7 @@ import json
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.formats import localize
 from django.utils.translation import gettext_lazy as _, pgettext
@@ -114,7 +115,7 @@ EU_CURRENCIES = {
     'RO': 'RON',
     'SE': 'SEK'
 }
-VAT_ID_COUNTRIES = EU_COUNTRIES | {'CH'}
+VAT_ID_COUNTRIES = EU_COUNTRIES | {'CH', 'NO'}
 
 
 def is_eu_country(cc):
@@ -149,7 +150,15 @@ class TaxRule(LoggedModel):
     rate = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        verbose_name=_("Tax rate")
+        validators=[
+            MaxValueValidator(
+                limit_value=Decimal("100.00"),
+            ),
+            MinValueValidator(
+                limit_value=Decimal("0.00"),
+            ),
+        ],
+        verbose_name=_("Tax rate"),
     )
     price_includes_tax = models.BooleanField(
         verbose_name=_("The configured product prices include the tax amount"),

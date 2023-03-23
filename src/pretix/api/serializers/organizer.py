@@ -41,15 +41,21 @@ from pretix.base.models import (
 from pretix.base.models.seating import SeatingPlanLayoutValidator
 from pretix.base.services.mail import SendMailException, mail
 from pretix.base.settings import validate_organizer_settings
-from pretix.helpers.urls import build_absolute_uri
+from pretix.helpers.urls import build_absolute_uri as build_global_uri
+from pretix.multidomain.urlreverse import build_absolute_uri
 
 logger = logging.getLogger(__name__)
 
 
 class OrganizerSerializer(I18nAwareModelSerializer):
+    public_url = serializers.SerializerMethodField('get_organizer_url', read_only=True)
+
+    def get_organizer_url(self, organizer):
+        return build_absolute_uri(organizer, 'presale:organizer.index')
+
     class Meta:
         model = Organizer
-        fields = ('name', 'slug')
+        fields = ('name', 'slug', 'public_url')
 
 
 class SeatingPlanSerializer(I18nAwareModelSerializer):
@@ -73,6 +79,27 @@ class CustomerSerializer(I18nAwareModelSerializer):
         model = Customer
         fields = ('identifier', 'external_identifier', 'email', 'name', 'name_parts', 'is_active', 'is_verified', 'last_login', 'date_joined',
                   'locale', 'last_modified', 'notes')
+
+    def update(self, instance, validated_data):
+        if instance and instance.provider_id:
+            validated_data['external_identifier'] = instance.external_identifier
+        return super().update(instance, validated_data)
+
+    def validate(self, data):
+        if data.get('name_parts') and not isinstance(data.get('name_parts'), dict):
+            raise ValidationError({'name_parts': ['Invalid data type']})
+        if data.get('name_parts') and '_scheme' not in data.get('name_parts'):
+            data['name_parts']['_scheme'] = self.context['request'].organizer.settings.name_scheme
+        return data
+
+
+class CustomerCreateSerializer(CustomerSerializer):
+    send_email = serializers.BooleanField(default=False, required=False, allow_null=True)
+    password = serializers.CharField(write_only=True, required=False, allow_null=True)
+
+    class Meta:
+        model = Customer
+        fields = CustomerSerializer.Meta.fields + ('send_email', 'password')
 
 
 class MembershipTypeSerializer(I18nAwareModelSerializer):
@@ -101,24 +128,25 @@ class MembershipSerializer(I18nAwareModelSerializer):
 
 
 class GiftCardSerializer(I18nAwareModelSerializer):
-    value = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.00'))
+    value = serializers.DecimalField(max_digits=13, decimal_places=2, min_value=Decimal('0.00'))
 
     def validate(self, data):
         data = super().validate(data)
-        s = data['secret']
-        qs = GiftCard.objects.filter(
-            secret=s
-        ).filter(
-            Q(issuer=self.context["organizer"]) | Q(
-                issuer__gift_card_collector_acceptance__collector=self.context["organizer"])
-        )
-        if self.instance:
-            qs = qs.exclude(pk=self.instance.pk)
-        if qs.exists():
-            raise ValidationError(
-                {'secret': _(
-                    'A gift card with the same secret already exists in your or an affiliated organizer account.')}
+        if 'secret' in data:
+            s = data['secret']
+            qs = GiftCard.objects.filter(
+                secret=s
+            ).filter(
+                Q(issuer=self.context["organizer"]) | Q(
+                    issuer__gift_card_collector_acceptance__collector=self.context["organizer"])
             )
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise ValidationError(
+                    {'secret': _(
+                        'A gift card with the same secret already exists in your or an affiliated organizer account.')}
+                )
         return data
 
     class Meta:
@@ -205,7 +233,7 @@ class TeamInviteSerializer(serializers.ModelSerializer):
                     'user': self,
                     'organizer': self.context['organizer'].name,
                     'team': instance.team.name,
-                    'url': build_absolute_uri('control:auth.invite', kwargs={
+                    'url': build_global_uri('control:auth.invite', kwargs={
                         'token': instance.token
                     })
                 },
@@ -274,6 +302,7 @@ class TeamMemberSerializer(serializers.ModelSerializer):
 class OrganizerSettingsSerializer(SettingsSerializer):
     default_fields = [
         'customer_accounts',
+        'customer_accounts_native',
         'customer_accounts_link_by_email',
         'invoice_regenerate_allowed',
         'contact_mail',

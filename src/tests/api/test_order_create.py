@@ -32,6 +32,7 @@ from django.utils.timezone import now
 from django_countries.fields import Country
 from django_scopes import scopes_disabled
 from pytz import UTC
+from tests.const import SAMPLE_PNG
 
 from pretix.base.models import (
     InvoiceAddress, Order, OrderPosition, Question, SeatingPlan,
@@ -152,6 +153,7 @@ ORDER_CREATE_PAYLOAD = {
     "phone": "+49622112345",
     "locale": "en",
     "sales_channel": "web",
+    "valid_if_pending": True,
     "fees": [
         {
             "fee_type": "payment",
@@ -172,6 +174,7 @@ ORDER_CREATE_PAYLOAD = {
         "city": "Sample City",
         "country": "NZ",
         "internal_reference": "",
+        "custom_field": None,
         "vat_id": ""
     },
     "positions": [
@@ -211,6 +214,7 @@ def test_order_create(token_client, organizer, event, item, quota, question):
         ), format='json', data=res
     )
     assert resp.status_code == 201
+    assert not resp.data['positions'][0].get('pdf_data')
     with scopes_disabled():
         o = Order.objects.get(code=resp.data['code'])
     assert o.customer == customer
@@ -220,6 +224,7 @@ def test_order_create(token_client, organizer, event, item, quota, question):
     assert o.total == Decimal('23.25')
     assert o.status == Order.STATUS_PENDING
     assert o.sales_channel == "web"
+    assert o.valid_if_pending
     assert not o.testmode
 
     with scopes_disabled():
@@ -292,6 +297,7 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
         'datetime': None,
         'payment_date': None,
         'payment_provider': None,
+        'valid_if_pending': True,
         'fees': [
             {
                 'id': 0,
@@ -320,7 +326,8 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
             'state': '',
             'vat_id': '',
             'vat_id_validated': False,
-            'internal_reference': ''
+            'internal_reference': '',
+            'custom_field': None
         },
         'positions': [
             {
@@ -338,8 +345,12 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
                 'tax_value': '0.00',
                 'addon_to': None,
                 'subevent': None,
+                'discount': None,
                 'checkins': [],
                 'downloads': [],
+                "valid_from": None,
+                "valid_until": None,
+                "blocked": None,
                 'answers': [
                     {'question': question.pk, 'answer': 'L', 'question_identifier': 'ABC',
                      'options': [opt.pk],
@@ -406,15 +417,15 @@ def test_order_create_positionids_addons_simulated(token_client, organizer, even
         {'id': 0, 'order': '', 'positionid': 1, 'item': item.pk, 'variation': None, 'price': '23.00',
          'attendee_name': 'Peter', 'attendee_name_parts': {'full_name': 'Peter', '_scheme': 'full'}, 'company': None,
          'street': None, 'zipcode': None, 'city': None, 'country': None, 'state': None, 'attendee_email': None,
-         'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00',
+         'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00', 'discount': None,
          'addon_to': None, 'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
-         'pseudonymization_id': 'PREVIEW', 'seat': None, 'canceled': False},
+         'pseudonymization_id': 'PREVIEW', 'seat': None, 'canceled': False, 'valid_from': None, 'valid_until': None, 'blocked': None},
         {'id': 0, 'order': '', 'positionid': 2, 'item': item.pk, 'variation': None, 'price': '23.00',
          'attendee_name': 'Peter', 'attendee_name_parts': {'full_name': 'Peter', '_scheme': 'full'}, 'company': None,
          'street': None, 'zipcode': None, 'city': None, 'country': None, 'state': None, 'attendee_email': None,
-         'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00',
+         'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00', 'discount': None,
          'addon_to': 1, 'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
-         'pseudonymization_id': 'PREVIEW', 'seat': None, 'canceled': False}
+         'pseudonymization_id': 'PREVIEW', 'seat': None, 'canceled': False, 'valid_from': None, 'valid_until': None, 'blocked': None}
     ]
 
 
@@ -1123,6 +1134,48 @@ def test_order_create_positionids_addons(token_client, organizer, event, item, q
 
 
 @pytest.mark.django_db
+def test_order_create_is_bundled_addons(token_client, organizer, event, item, quota):
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'] = [
+        {
+            "positionid": 1,
+            "item": item.pk,
+            "variation": None,
+            "price": "23.00",
+            "attendee_name_parts": {"full_name": "Peter"},
+            "attendee_email": None,
+            "addon_to": None,
+            "answers": [],
+            "subevent": None
+        },
+        {
+            "positionid": 2,
+            "item": item.pk,
+            "variation": None,
+            "price": "23.00",
+            "attendee_name_parts": {"full_name": "Peter"},
+            "attendee_email": None,
+            "addon_to": 1,
+            "is_bundled": True,
+            "answers": [],
+            "subevent": None
+        }
+    ]
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        pos1 = o.positions.first()
+        pos2 = o.positions.last()
+    assert pos2.addon_to == pos1
+    assert pos2.is_bundled
+
+
+@pytest.mark.django_db
 def test_order_create_positionid_validation(token_client, organizer, event, item, quota):
     res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
     res['positions'] = [
@@ -1378,7 +1431,7 @@ def test_order_create_answer_validation(token_client, organizer, event, item, qu
         '/api/v1/upload',
         data={
             'media_type': 'image/png',
-            'file': ContentFile('file.png', 'invalid png content')
+            'file': ContentFile(SAMPLE_PNG)
         },
         format='upload',
         HTTP_CONTENT_DISPOSITION='attachment; filename="file.png"',
@@ -1983,7 +2036,7 @@ def test_order_create_with_duplicate_seat(token_client, organizer, event, item, 
             "price": "23.00",
             "attendee_name_parts": {"full_name": "Peter"},
             "attendee_email": None,
-            "addon_to": 1,
+            "addon_to": None,
             "answers": [],
             "subevent": None,
             "seat": seat.seat_guid
@@ -2024,6 +2077,31 @@ def test_order_create_with_seat_consumed_from_cart(token_client, organizer, even
         o = Order.objects.get(code=resp.data['code'])
         p = o.positions.first()
     assert p.seat == seat
+
+
+@pytest.mark.django_db
+def test_order_create_with_voucher_consumed_from_cart(token_client, organizer, event, item, quota, question):
+    with scopes_disabled():
+        voucher = event.vouchers.create(code="FOOBAR", item=item, max_usages=3, redeemed=2)
+    CartPosition.objects.create(
+        event=event, cart_id='aaa', item=item, voucher=voucher,
+        price=21.5, expires=now() + datetime.timedelta(minutes=10),
+    )
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['voucher'] = voucher.code
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    res['consume_carts'] = ['aaa']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        p = o.positions.first()
+    assert p.voucher == voucher
 
 
 @pytest.mark.django_db
@@ -2173,6 +2251,101 @@ def test_order_paid_require_payment_method(token_client, organizer, event, item,
     with scopes_disabled():
         o = Order.objects.get(code=resp.data['code'])
         assert not o.payments.exists()
+
+
+@pytest.mark.django_db
+def test_order_create_auto_validity(token_client, organizer, event, item, quota, question):
+    item.validity_mode = 'dynamic'
+    item.validity_dynamic_duration_minutes = 30
+    item.save()
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    del res['positions'][0]['price']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        p = o.positions.first()
+    assert now() - datetime.timedelta(seconds=30) < p.valid_from <= now()
+    assert now() + datetime.timedelta(minutes=29) < p.valid_until < now() + datetime.timedelta(minutes=31)
+
+
+@pytest.mark.django_db
+def test_order_create_manual_validity_precedence(token_client, organizer, event, item, quota, question):
+    item.validity_mode = 'dynamic'
+    item.validity_dynamic_duration_minutes = 30
+    item.save()
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    res['positions'][0]['valid_from'] = '2022-01-01T09:00:00.000Z'
+    res['positions'][0]['valid_until'] = '2022-01-03T09:00:00.000Z'
+    del res['positions'][0]['price']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        p = o.positions.first()
+    assert p.valid_from.isoformat() == '2022-01-01T09:00:00+00:00'
+    assert p.valid_until.isoformat() == '2022-01-03T09:00:00+00:00'
+
+
+@pytest.mark.django_db
+def test_order_create_auto_validity_with_requested_start(token_client, organizer, event, item, quota, question):
+    item.validity_mode = 'dynamic'
+    item.validity_dynamic_duration_minutes = 30
+    item.validity_dynamic_start_choice = True
+    item.save()
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    res['positions'][0]['requested_valid_from'] = '2039-01-01T09:00:00.000Z'
+    del res['positions'][0]['price']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        p = o.positions.first()
+    assert p.valid_from.isoformat() == '2039-01-01T09:00:00+00:00'
+    assert p.valid_until.isoformat() == '2039-01-01T09:30:00+00:00'
+
+
+@pytest.mark.django_db
+def test_order_create_auto_validity_with_requested_start_limitation(token_client, organizer, event, item, quota, question):
+    item.validity_mode = 'dynamic'
+    item.validity_dynamic_duration_minutes = 30
+    item.validity_dynamic_start_choice = True
+    item.validity_dynamic_start_choice_day_limit = 24
+    item.save()
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    res['positions'][0]['requested_valid_from'] = (now() + datetime.timedelta(days=30)).isoformat()
+    del res['positions'][0]['price']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        p = o.positions.first()
+    assert now() + datetime.timedelta(days=23) < p.valid_from <= now() + datetime.timedelta(days=26)
+    assert p.valid_until == p.valid_from + datetime.timedelta(minutes=30)
 
 
 @pytest.mark.django_db
@@ -2518,6 +2691,119 @@ def test_order_create_voucher_block_quota(token_client, organizer, event, item, 
         voucher = event.vouchers.create(price_mode="set", value=15, item=item, redeemed=0,
                                         block_quota=True)
     res['positions'][0]['voucher'] = voucher.code
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+
+
+@pytest.mark.django_db
+def test_order_create_pdf_data(token_client, organizer, event, item, quota, question):
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    with scopes_disabled():
+        customer = organizer.customers.create()
+    res['customer'] = customer.identifier
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/?pdf_data=true'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    assert 'secret' in resp.data['positions'][0]['pdf_data']
+
+
+@pytest.mark.django_db
+def test_create_cart_and_consume_cart_with_addons(token_client, organizer, event, item, quota, question):
+    # End to end test for the combination of cart creation and order creation, as used eg in POS
+    with scopes_disabled():
+        addon_cat = event.categories.create(name='Addons')
+        addon_item = event.items.create(name='Workshop', default_price=2, category=addon_cat)
+        item.addons.create(addon_category=addon_cat)
+        q = event.quotas.create(name="Addon Quota", size=1)
+        q.items.add(addon_item)
+
+    res = {
+        'cart_id': 'aaa@api',
+        'item': item.pk,
+        'variation': None,
+        'price': '23.00',
+        'attendee_name_parts': {'full_name': 'Peter'},
+        'attendee_email': None,
+        'addon_to': None,
+        'subevent': None,
+        'expires': (now() + datetime.timedelta(days=1)).isoformat(),
+        'includes_tax': True,
+        'sales_channel': 'web',
+        'answers': [],
+        'addons': [
+            {
+                'item': addon_item.pk,
+                'variation': None,
+                'price': '1.00',
+                'attendee_name_parts': {'full_name': 'Peter\'s friend'},
+                'attendee_email': None,
+                'subevent': None,
+                'includes_tax': True,
+                'answers': []
+            }
+        ],
+    }
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/cartpositions/bulk_create/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=[
+            res
+        ]
+    )
+    assert resp.status_code == 200
+    assert len(resp.data['results']) == 1
+    assert resp.data['results'][0]['success']
+    assert resp.data['results'][0]['data']['addons']
+
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'] = [
+        {
+            "positionid": 1,
+            "item": item.pk,
+            "variation": None,
+            "price": "23.00",
+            "attendee_name_parts": {"full_name": "Peter"},
+            "attendee_email": None,
+            "addon_to": None,
+            "answers": [],
+            "subevent": None
+        },
+        {
+            "positionid": 2,
+            "item": addon_item.pk,
+            "variation": None,
+            "price": "23.00",
+            "attendee_name_parts": {"full_name": "Peter"},
+            "attendee_email": None,
+            "addon_to": 1,
+            "answers": [],
+            "subevent": None
+        }
+    ]
+
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 400
+    assert resp.data == {
+        'positions': [
+            {},
+            {'item': ['There is not enough quota available on quota "Addon Quota" to perform the operation.']},
+        ]
+    }
+
+    res['consume_carts'] = ['aaa@api']
     resp = token_client.post(
         '/api/v1/organizers/{}/events/{}/orders/'.format(
             organizer.slug, event.slug

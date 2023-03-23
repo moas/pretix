@@ -19,13 +19,10 @@
 # You should have received a copy of the GNU Affero General Public License along with this program.  If not, see
 # <https://www.gnu.org/licenses/>.
 #
-from django.conf.urls import include, re_path
+from django.conf.urls import re_path
+from django.urls import include
 
-from pretix.multidomain import event_url
-
-from .views import (
-    abort, oauth_disconnect, oauth_return, redirect_view, success, webhook,
-)
+from .views import abort, oauth_disconnect, redirect_view, success
 
 event_patterns = [
     re_path(r'^paypal/', include([
@@ -35,14 +32,10 @@ event_patterns = [
 
         re_path(r'w/(?P<cart_namespace>[a-zA-Z0-9]{16})/abort/', abort, name='abort'),
         re_path(r'w/(?P<cart_namespace>[a-zA-Z0-9]{16})/return/', success, name='return'),
-
-        event_url(r'^webhook/$', webhook, name='webhook', require_live=False),
     ])),
 ]
 
 urlpatterns = [
     re_path(r'^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/paypal/disconnect/',
             oauth_disconnect, name='oauth.disconnect'),
-    re_path(r'^_paypal/webhook/$', webhook, name='webhook'),
-    re_path(r'^_paypal/oauth_return/$', oauth_return, name='oauth.return'),
 ]

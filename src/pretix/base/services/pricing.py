@@ -19,9 +19,11 @@
 # You should have received a copy of the GNU Affero General Public License along with this program.  If not, see
 # <https://www.gnu.org/licenses/>.
 #
+import re
 from decimal import Decimal
 from typing import List, Optional, Tuple
 
+from django import forms
 from django.db.models import Q
 from django.utils.timezone import now
 
@@ -69,8 +71,17 @@ def get_price(item: Item, variation: ItemVariation = None,
                                  subtract_from_gross=bundled_sum)
     elif item.free_price and custom_price is not None and custom_price != "":
         if not isinstance(custom_price, Decimal):
-            custom_price = Decimal(str(custom_price).replace(",", "."))
-        if custom_price > 100000000:
+            custom_price = re.sub('[^0-9.,]', '', str(custom_price))
+            if not custom_price:
+                raise ValueError('price_not_a_number')
+            try:
+                custom_price = forms.DecimalField(localize=True).to_python(custom_price)
+            except:
+                try:
+                    custom_price = Decimal(custom_price)
+                except:
+                    raise ValueError('price_not_a_number')
+        if custom_price > 99_999_999_999:
             raise ValueError('price_too_high')
 
         price = tax_rule.tax(price, invoice_address=invoice_address)
@@ -117,7 +128,7 @@ def get_listed_price(item: Item, variation: ItemVariation = None, subevent: SubE
 
 
 def get_line_price(price_after_voucher: Decimal, custom_price_input: Decimal, custom_price_input_is_net: bool,
-                   tax_rule: TaxRule, invoice_address: InvoiceAddress, bundled_sum: Decimal) -> TaxedPrice:
+                   tax_rule: TaxRule, invoice_address: InvoiceAddress, bundled_sum: Decimal, is_bundled=False) -> TaxedPrice:
     if not tax_rule:
         tax_rule = TaxRule(
             name='',
@@ -135,7 +146,8 @@ def get_line_price(price_after_voucher: Decimal, custom_price_input: Decimal, cu
             price = tax_rule.tax(max(custom_price_input, price.gross), base_price_is='gross', override_tax_rate=price.rate,
                                  invoice_address=invoice_address, subtract_from_gross=bundled_sum)
     else:
-        price = tax_rule.tax(price_after_voucher, invoice_address=invoice_address, subtract_from_gross=bundled_sum)
+        price = tax_rule.tax(price_after_voucher, invoice_address=invoice_address, subtract_from_gross=bundled_sum,
+                             base_price_is='gross' if is_bundled else 'auto')
 
     return price
 

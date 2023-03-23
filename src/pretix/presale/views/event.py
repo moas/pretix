@@ -35,6 +35,7 @@
 import calendar
 import hashlib
 import sys
+import urllib.parse
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -42,7 +43,6 @@ from importlib import import_module
 from urllib.parse import urlencode
 
 import isoweek
-import pytz
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db.models import (
@@ -63,9 +63,9 @@ from pretix.base.channels import get_all_sales_channels
 from pretix.base.models import (
     ItemVariation, Quota, SeatCategoryMapping, Voucher,
 )
-from pretix.base.models.event import SubEvent
+from pretix.base.models.event import Event, SubEvent
 from pretix.base.models.items import (
-    ItemBundle, SubEventItem, SubEventItemVariation,
+    ItemAddOn, ItemBundle, SubEventItem, SubEventItemVariation,
 )
 from pretix.base.services.quotas import QuotaAvailability
 from pretix.helpers.compat import date_fromisocalendar
@@ -74,7 +74,7 @@ from pretix.presale.ical import get_public_ical
 from pretix.presale.signals import item_description
 from pretix.presale.views.organizer import (
     EventListMixin, add_subevents_for_days, days_for_template,
-    filter_qs_by_attr, weeks_for_template,
+    filter_qs_by_attr, has_before_after, weeks_for_template,
 )
 
 from ...helpers.formats.en.formats import SHORT_MONTH_DAY_FORMAT, WEEK_FORMAT
@@ -181,6 +181,13 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web', require
                 Q(disabled=True) | Q(available_from__gt=now()) | Q(available_until__lt=now()),
                 item_id=OuterRef('pk'),
                 subevent=subevent,
+            )
+        ),
+        mandatory_priced_addons=Exists(
+            ItemAddOn.objects.filter(
+                base_item_id=OuterRef('pk'),
+                min_count__gte=1,
+                price_included=False
             )
         ),
         requires_seat=requires_seat,
@@ -302,8 +309,8 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web', require
                              base_price_is='net' if event.settings.display_net_prices else 'gross')  # backwards-compat
                     if item.original_price else None
                 )
-
-            display_add_to_cart = display_add_to_cart or item.order_max > 0
+            if not display_add_to_cart:
+                display_add_to_cart = not item.requires_seat and item.order_max > 0
         else:
             for var in item.available_variations:
                 if var.require_membership and var.require_membership_hidden:
@@ -348,7 +355,8 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web', require
                                 base_price_is='net' if event.settings.display_net_prices else 'gross')  # backwards-compat
                     ) if var.original_price or item.original_price else None
 
-                display_add_to_cart = display_add_to_cart or var.order_max > 0
+                if not display_add_to_cart:
+                    display_add_to_cart = not item.requires_seat and var.order_max > 0
 
             item.original_price = (
                 item.tax(item.original_price, currency=event.currency, include_bundled=True,
@@ -416,9 +424,11 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
         elif request.GET.get('iframe', '') == '1' and 'take_cart_id' in request.GET:
             # Widget just opened, a cart already exists. Let's to a stupid redirect to check if cookies are disabled
             get_or_create_cart_id(request)
-            return redirect(eventreverse(request.event, 'presale:event.index', kwargs=kwargs) + '?require_cookie=true&cart_id={}'.format(
-                request.GET.get('take_cart_id')
-            ))
+            return redirect(eventreverse(request.event, 'presale:event.index', kwargs=kwargs) + '?' + urllib.parse.urlencode({
+                'require_cookie': 'true',
+                'cart_id': request.GET.get('take_cart_id'),
+                **({"locale": request.GET.get('locale')} if request.GET.get('locale') else {}),
+            }))
         elif request.GET.get('iframe', '') == '1' and len(self.request.GET.get('widget_data', '{}')) > 3:
             # We've been passed data from a widget, we need to create a cart session to store it.
             get_or_create_cart_id(request)
@@ -427,10 +437,11 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
             r = render(request, 'pretixpresale/event/cookies.html', {
                 'url': eventreverse(
                     request.event, "presale:event.index", kwargs={'cart_namespace': kwargs.get('cart_namespace') or ''}
-                ) + (
-                    "?src=widget&take_cart_id={}".format(request.GET.get('cart_id'))
-                    if "cart_id" in request.GET else ""
-                )
+                ) + "?" + urllib.parse.urlencode({
+                    "src": "widget",
+                    **({"locale": request.GET.get('locale')} if request.GET.get('locale') else {}),
+                    **({"take_cart_id": request.GET.get('cart_id')} if request.GET.get('cart_id') else {}),
+                })
             })
             r._csp_ignore = True
             return r
@@ -570,10 +581,15 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
 
         if context['list_type'] == "calendar":
             self._set_month_year()
-            tz = pytz.timezone(self.request.event.settings.timezone)
+            tz = self.request.event.timezone
             _, ndays = calendar.monthrange(self.year, self.month)
             before = datetime(self.year, self.month, 1, 0, 0, 0, tzinfo=tz) - timedelta(days=1)
             after = datetime(self.year, self.month, ndays, 0, 0, 0, tzinfo=tz) + timedelta(days=1)
+
+            if self.request.event.settings.event_calendar_future_only:
+                limit_before = now().astimezone(tz)
+            else:
+                limit_before = before
 
             context['date'] = date(self.year, self.month, 1)
             context['before'] = before
@@ -582,7 +598,7 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
             ebd = defaultdict(list)
             add_subevents_for_days(
                 filter_qs_by_attr(self.request.event.subevents_annotated(self.request.sales_channel.identifier).using(settings.DATABASE_REPLICA), self.request),
-                before, after, ebd, set(), self.request.event,
+                limit_before, after, ebd, set(), self.request.event,
                 self.kwargs.get('cart_namespace'),
                 voucher,
             )
@@ -595,12 +611,25 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
                 lambda: len(set(str(n) for n in self.request.event.subevents.order_by().values_list('name', flat=True).annotate(c=Count('*'))[:250])) != 1,
                 timeout=120,
             )
-            context['weeks'] = weeks_for_template(ebd, self.year, self.month)
+            context['weeks'] = weeks_for_template(ebd, self.year, self.month, future_only=self.request.event.settings.event_calendar_future_only)
             context['months'] = [date(self.year, i + 1, 1) for i in range(12)]
-            context['years'] = range(now().year - 2, now().year + 3)
+            if self.request.event.settings.event_calendar_future_only:
+                context['years'] = range(now().year, now().year + 3)
+            else:
+                context['years'] = range(now().year - 2, now().year + 3)
+
+            context['has_before'], context['has_after'] = has_before_after(
+                Event.objects.none(),
+                SubEvent.objects.filter(
+                    event=self.request.event,
+                ),
+                before,
+                after,
+                future_only=self.request.event.settings.event_calendar_future_only
+            )
         elif context['list_type'] == "week":
             self._set_week_year()
-            tz = pytz.timezone(self.request.event.settings.timezone)
+            tz = self.request.event.timezone
             week = isoweek.Week(self.year, self.week)
             before = datetime(
                 week.monday().year, week.monday().month, week.monday().day, 0, 0, 0, tzinfo=tz
@@ -609,6 +638,11 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
                 week.sunday().year, week.sunday().month, week.sunday().day, 0, 0, 0, tzinfo=tz
             ) + timedelta(days=1)
 
+            if self.request.event.settings.event_calendar_future_only:
+                limit_before = now().astimezone(tz)
+            else:
+                limit_before = before
+
             context['date'] = week.monday()
             context['before'] = before
             context['after'] = after
@@ -616,7 +650,7 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
             ebd = defaultdict(list)
             add_subevents_for_days(
                 filter_qs_by_attr(self.request.event.subevents_annotated(self.request.sales_channel.identifier).using(settings.DATABASE_REPLICA), self.request),
-                before, after, ebd, set(), self.request.event,
+                limit_before, after, ebd, set(), self.request.event,
                 self.kwargs.get('cart_namespace'),
                 voucher,
             )
@@ -629,13 +663,15 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
                 lambda: len(set(str(n) for n in self.request.event.subevents.order_by().values_list('name', flat=True).annotate(c=Count('*'))[:250])) != 1,
                 timeout=120,
             )
-            context['days'] = days_for_template(ebd, week)
+            context['days'] = days_for_template(ebd, week, future_only=self.request.event.settings.event_calendar_future_only)
             years = (self.year - 1, self.year, self.year + 1)
             weeks = []
             for year in years:
                 weeks += [
                     (date_fromisocalendar(year, i + 1, 1), date_fromisocalendar(year, i + 1, 7))
                     for i in range(53 if date(year, 12, 31).isocalendar()[1] == 53 else 52)
+                    if not self.request.event.settings.event_calendar_future_only or
+                    date_fromisocalendar(year, i + 1, 7) > now().astimezone(tz).replace(tzinfo=None)
                 ]
             context['weeks'] = [[w for w in weeks if w[0].year == year] for year in years]
             context['week_format'] = get_format('WEEK_FORMAT')
@@ -644,6 +680,16 @@ class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
             context['short_month_day_format'] = get_format('SHORT_MONTH_DAY_FORMAT')
             if context['short_month_day_format'] == 'SHORT_MONTH_DAY_FORMAT':
                 context['short_month_day_format'] = SHORT_MONTH_DAY_FORMAT
+
+            context['has_before'], context['has_after'] = has_before_after(
+                Event.objects.none(),
+                SubEvent.objects.filter(
+                    event=self.request.event,
+                ),
+                before,
+                after,
+                future_only=self.request.event.settings.event_calendar_future_only
+            )
         else:
             context['subevent_list'] = self.request.event.subevents_sorted(
                 filter_qs_by_attr(self.request.event.subevents_annotated(self.request.sales_channel.identifier).using(settings.DATABASE_REPLICA), self.request)
@@ -700,6 +746,22 @@ class SeatingPlanView(EventViewMixin, TemplateView):
                                                 kwargs={'cart_namespace': kwargs.get('cart_namespace') or ''})
         if context['cart_redirect'].startswith('https:'):
             context['cart_redirect'] = '/' + context['cart_redirect'].split('/', 3)[3]
+
+        v = self.request.GET.get('voucher')
+        if v:
+            v = v.strip()
+            try:
+                voucher = self.request.event.vouchers.get(code__iexact=v)
+                if voucher.redeemed >= voucher.max_usages or voucher.valid_until is not None \
+                        and voucher.valid_until < now() or voucher.item is not None \
+                        and voucher.item.is_available() is False:
+                    voucher = None
+            except Voucher.DoesNotExist:
+                voucher = None
+        else:
+            voucher = None
+        context['voucher'] = voucher
+
         return context
 
 

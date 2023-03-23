@@ -36,12 +36,12 @@ import copy
 from collections import defaultdict
 from datetime import datetime, time, timedelta
 
-from dateutil.rrule import DAILY, MONTHLY, WEEKLY, YEARLY, rrule, rruleset
+from dateutil.rrule import rruleset
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.files import File
 from django.db import connections, transaction
-from django.db.models import Count, F, Prefetch
+from django.db.models import Count, F, Prefetch, ProtectedError
 from django.db.models.functions import Coalesce, TruncDate, TruncTime
 from django.forms import inlineformset_factory
 from django.http import Http404, HttpResponse, HttpResponseRedirect
@@ -52,9 +52,7 @@ from django.utils.functional import cached_property
 from django.utils.timezone import make_aware
 from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django.views import View
-from django.views.generic import (
-    CreateView, DeleteView, FormView, ListView, UpdateView,
-)
+from django.views.generic import CreateView, FormView, ListView, UpdateView
 
 from pretix.base.models import CartPosition, LogEntry
 from pretix.base.models.checkin import CheckinList
@@ -80,6 +78,7 @@ from pretix.control.signals import subevent_forms
 from pretix.control.views import PaginationMixin
 from pretix.control.views.event import MetaDataEditorMixin
 from pretix.helpers import GroupConcat
+from pretix.helpers.compat import CompatDeleteView
 from pretix.helpers.models import modelcopy
 
 
@@ -111,7 +110,7 @@ class SubEventQueryMixin:
 
     @cached_property
     def filter_form(self):
-        return SubEventFilterForm(data=self.request_data, prefix='filter')
+        return SubEventFilterForm(data=self.request_data, prefix='filter', event=self.request.event)
 
 
 class SubEventList(EventPermissionRequiredMixin, PaginationMixin, SubEventQueryMixin, ListView):
@@ -126,6 +125,9 @@ class SubEventList(EventPermissionRequiredMixin, PaginationMixin, SubEventQueryM
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['filter_form'] = self.filter_form
+        ctx['meta_fields'] = [
+            self.filter_form['meta_{}'.format(p.name)] for p in self.request.organizer.meta_properties.filter(filter_allowed=True)
+        ]
 
         quotas = []
         for s in ctx['subevents']:
@@ -148,7 +150,7 @@ class SubEventList(EventPermissionRequiredMixin, PaginationMixin, SubEventQueryM
         return ctx
 
 
-class SubEventDelete(EventPermissionRequiredMixin, DeleteView):
+class SubEventDelete(EventPermissionRequiredMixin, CompatDeleteView):
     model = SubEvent
     template_name = 'pretixcontrol/subevents/delete.html'
     permission = 'can_change_settings'
@@ -249,7 +251,9 @@ class SubEventEditorMixin(MetaDataEditorMixin):
                     'include_pending': False,
                 }
             ]
-            extra = 0
+
+            if not self.request.event.checkin_lists.filter(subevent__isnull=True).exists():
+                extra = 1
 
         formsetclass = inlineformset_factory(
             SubEvent, CheckinList,
@@ -639,12 +643,14 @@ class SubEventBulkAction(SubEventQueryMixin, EventPermissionRequiredMixin, View)
             })
         elif request.POST.get('action') == 'delete_confirm':
             for obj in self.get_queryset():
-                if obj.allow_delete():
+                try:
+                    if not obj.allow_delete():
+                        raise ProtectedError('only deactivate', [obj])
                     CartPosition.objects.filter(addon_to__subevent=obj).delete()
                     obj.cartposition_set.all().delete()
                     obj.log_action('pretix.subevent.deleted', user=self.request.user)
                     obj.delete()
-                else:
+                except ProtectedError:
                     obj.log_action(
                         'pretix.subevent.changed', user=self.request.user, data={
                             'active': False
@@ -787,41 +793,10 @@ class SubEventBulkCreate(SubEventEditorMixin, EventPermissionRequiredMixin, Asyn
             if f in self.rrule_formset.deleted_forms:
                 continue
 
-            rule_kwargs = {}
-            rule_kwargs['dtstart'] = f.cleaned_data['dtstart']
-            rule_kwargs['interval'] = f.cleaned_data['interval']
-
-            if f.cleaned_data['freq'] == 'yearly':
-                freq = YEARLY
-                if f.cleaned_data['yearly_same'] == "off":
-                    rule_kwargs['bysetpos'] = int(f.cleaned_data['yearly_bysetpos'])
-                    rule_kwargs['byweekday'] = f.parse_weekdays(f.cleaned_data['yearly_byweekday'])
-                    rule_kwargs['bymonth'] = int(f.cleaned_data['yearly_bymonth'])
-
-            elif f.cleaned_data['freq'] == 'monthly':
-                freq = MONTHLY
-
-                if f.cleaned_data['monthly_same'] == "off":
-                    rule_kwargs['bysetpos'] = int(f.cleaned_data['monthly_bysetpos'])
-                    rule_kwargs['byweekday'] = f.parse_weekdays(f.cleaned_data['monthly_byweekday'])
-            elif f.cleaned_data['freq'] == 'weekly':
-                freq = WEEKLY
-
-                if f.cleaned_data['weekly_byweekday']:
-                    rule_kwargs['byweekday'] = [f.parse_weekdays(a) for a in f.cleaned_data['weekly_byweekday']]
-
-            elif f.cleaned_data['freq'] == 'daily':
-                freq = DAILY
-
-            if f.cleaned_data['end'] == 'count':
-                rule_kwargs['count'] = f.cleaned_data['count']
-            else:
-                rule_kwargs['until'] = f.cleaned_data['until']
-
             if f.cleaned_data['exclude']:
-                s.exrule(rrule(freq, **rule_kwargs))
+                s.exrule(f.to_rrule())
             else:
-                s.rrule(rrule(freq, **rule_kwargs))
+                s.rrule(f.to_rrule())
 
         return s
 

@@ -64,6 +64,10 @@ class EventPluginSignal(django.dispatch.Signal):
             # Send to all events!
             return True
 
+        # If sentry packed this in a wrapper, unpack that
+        if "sentry" in receiver.__module__:
+            receiver = receiver.__wrapped__
+
         # Find the Django application this belongs to
         searchpath = receiver.__module__
         core_module = any([searchpath.startswith(cm) for cm in settings.CORE_MODULES])
@@ -303,7 +307,7 @@ The ``sender`` keyword argument will contain an organizer.
 validate_order = EventPluginSignal(
 )
 """
-Arguments: ``payment_provider``, ``positions``, ``email``, ``locale``, ``invoice_address``,
+Arguments: ``payments``, ``positions``, ``email``, ``locale``, ``invoice_address``,
 ``meta_info``, ``customer``
 
 This signal is sent out when the user tries to confirm the order, before we actually create
@@ -312,6 +316,9 @@ but you can raise an OrderError with an appropriate exception message if you lik
 the order. We strongly discourage making changes to the order here.
 
 As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+
+**DEPRECTATION:** Stop listening to the ``payment_provider`` attribute, it will be removed
+in the future, as the ``payments`` attribute gives more information.
 """
 
 validate_cart = EventPluginSignal()
@@ -531,6 +538,19 @@ keyword argument will contain the event to **copy from**. The keyword arguments
 in the new event of the respective types.
 """
 
+orderposition_blocked_display = EventPluginSignal()
+"""
+Arguments: ``orderposition``, ``block_name``
+
+To display the reason for a blocked ticket to a backend user,
+``pretix.base.signals.orderposition_block_display`` will be sent out.
+
+The first received response that is not ``None`` will be used to display the block
+to the user. The receivers are expected to return plain text.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
 item_copy_data = EventPluginSignal()
 """
 Arguments: ``source``, ``target``
@@ -560,7 +580,7 @@ an OrderedDict of (setting name, form field).
 
 order_fee_calculation = EventPluginSignal()
 """
-Arguments: ``positions``, ``invoice_address``, ``meta_info``, ``total``, ``gift_cards``
+Arguments: ``positions``, ``invoice_address``, ``meta_info``, ``total``, ``gift_cards``, ``payment_requests``
 
 This signals allows you to add fees to an order while it is being created. You are expected to
 return a list of ``OrderFee`` objects that are not yet saved to the database
@@ -570,8 +590,10 @@ As with all plugin signals, the ``sender`` keyword argument will contain the eve
 argument will contain the cart positions and ``invoice_address`` the invoice address (useful for
 tax calculation). The argument ``meta_info`` contains the order's meta dictionary. The ``total``
 keyword argument will contain the total cart sum without any fees. You should not rely on this
-``total`` value for fee calculations as other fees might interfere. The ``gift_cards`` argument lists
-the gift cards in use.
+``total`` value for fee calculations as other fees might interfere. The ``gift_cards`` argument
+lists the gift cards in use.
+
+**DEPRECTATION:** Stop listening to the ``gift_cards`` attribute, it will be removed in the future.
 """
 
 order_fee_type_name = EventPluginSignal()

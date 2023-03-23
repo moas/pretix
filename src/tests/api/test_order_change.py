@@ -31,6 +31,7 @@ from django.utils.timezone import now
 from django_countries.fields import Country
 from django_scopes import scopes_disabled
 from pytz import UTC
+from tests.const import SAMPLE_PNG
 
 from pretix.base.models import (
     InvoiceAddress, Order, OrderPosition, Question, SeatingPlan,
@@ -254,6 +255,7 @@ def test_order_update_allowed_fields(token_client, organizer, event, order):
             organizer.slug, event.slug, order.code
         ), format='json', data={
             'comment': 'Here is a comment',
+            'valid_if_pending': True,
             'custom_followup_at': '2021-06-12',
             'checkin_attention': True,
             'email': 'foo@bar.com',
@@ -282,6 +284,7 @@ def test_order_update_allowed_fields(token_client, organizer, event, order):
     assert order.email == 'foo@bar.com'
     assert order.phone == '+4962219999'
     assert order.locale == 'de'
+    assert order.valid_if_pending
     assert order.invoice_address.company == "This is my company name"
     assert order.invoice_address.name_cached == "John Doe"
     assert order.invoice_address.name_parts == {'_legacy': 'John Doe'}
@@ -444,6 +447,7 @@ def test_order_create_invoice(token_client, organizer, event, order):
         'introductory_text': '',
         'additional_text': '',
         'payment_provider_text': '',
+        'payment_provider_stamp': None,
         'footer_text': '',
         'lines': [
             {
@@ -536,6 +540,64 @@ def test_position_regenerate_secrets(token_client, organizer, event, order):
     p.refresh_from_db()
     with scopes_disabled():
         assert ps != p.secret
+
+
+@pytest.mark.django_db
+def test_position_manage_blocks(token_client, organizer, event, order):
+    with scopes_disabled():
+        p = order.positions.first()
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orderpositions/{}/add_block/'.format(
+            organizer.slug, event.slug, p.pk,
+        ), format='json', data={
+            'name': 'invalid'
+        }
+    )
+    assert resp.status_code == 400
+
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orderpositions/{}/add_block/'.format(
+            organizer.slug, event.slug, p.pk,
+        ), format='json', data={
+            'name': 'admin'
+        }
+    )
+    assert resp.status_code == 200
+    p.refresh_from_db()
+    assert p.blocked == ['admin']
+
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orderpositions/{}/add_block/'.format(
+            organizer.slug, event.slug, p.pk,
+        ), format='json', data={
+            'name': 'api:custom'
+        }
+    )
+    assert resp.status_code == 200
+    p.refresh_from_db()
+    assert p.blocked == ['admin', 'api:custom']
+
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orderpositions/{}/remove_block/'.format(
+            organizer.slug, event.slug, p.pk,
+        ), format='json', data={
+            'name': 'api:custom'
+        }
+    )
+    assert resp.status_code == 200
+    p.refresh_from_db()
+    assert p.blocked == ['admin']
+
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orderpositions/{}/remove_block/'.format(
+            organizer.slug, event.slug, p.pk,
+        ), format='json', data={
+            'name': 'admin'
+        }
+    )
+    assert resp.status_code == 200
+    p.refresh_from_db()
+    assert p.blocked is None
 
 
 @pytest.mark.django_db
@@ -1018,7 +1080,7 @@ def test_position_update_question_handling(token_client, organizer, event, order
         '/api/v1/upload',
         data={
             'media_type': 'image/png',
-            'file': ContentFile('file.png', 'invalid png content')
+            'file': ContentFile(SAMPLE_PNG)
         },
         format='upload',
         HTTP_CONTENT_DISPOSITION='attachment; filename="file.png"',
@@ -1612,6 +1674,8 @@ def test_position_add_and_set_info(token_client, organizer, event, order, questi
         'order': order.code,
         'item': item.pk,
         'attendee_name': 'John Doe',
+        'valid_from': '2022-12-12T12:12:12+00:00',
+        'valid_until': '2022-12-12T13:12:12+00:00',
         'answers': [
             {
                 'question': question.pk,
@@ -1633,6 +1697,27 @@ def test_position_add_and_set_info(token_client, organizer, event, order, questi
         assert op.positionid == 3
         assert op.attendee_name == 'John Doe'
         assert op.answers.count() == 1
+        assert op.valid_from.isoformat() == '2022-12-12T12:12:12+00:00'
+        assert op.valid_until.isoformat() == '2022-12-12T13:12:12+00:00'
+
+
+@pytest.mark.django_db
+def test_position_update_validity(token_client, organizer, event, order, quota, item, subevent):
+    with scopes_disabled():
+        op = order.positions.get()
+    payload = {
+        'valid_from': '2022-12-12T12:12:12+00:00',
+        'valid_until': '2022-12-12T13:12:12+00:00',
+    }
+    resp = token_client.patch(
+        '/api/v1/organizers/{}/events/{}/orderpositions/{}/'.format(
+            organizer.slug, event.slug, op.pk
+        ), format='json', data=payload
+    )
+    assert resp.status_code == 200
+    op.refresh_from_db()
+    assert op.valid_from.isoformat() == '2022-12-12T12:12:12+00:00'
+    assert op.valid_until.isoformat() == '2022-12-12T13:12:12+00:00'
 
 
 @pytest.mark.django_db
@@ -1673,6 +1758,8 @@ def test_order_change_patch(token_client, organizer, event, order, quota):
         assert p.item == item2
         f.refresh_from_db()
         assert f.value == Decimal('10.00')
+        order.refresh_from_db()
+        assert order.total == Decimal('109.44')
 
 
 @pytest.mark.django_db

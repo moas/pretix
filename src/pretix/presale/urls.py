@@ -32,7 +32,8 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
 
-from django.conf.urls import include, re_path
+from django.conf.urls import re_path
+from django.urls import include
 from django.views.decorators.csrf import csrf_exempt
 
 import pretix.presale.views.cart
@@ -40,6 +41,7 @@ import pretix.presale.views.checkout
 import pretix.presale.views.customer
 import pretix.presale.views.event
 import pretix.presale.views.locale
+import pretix.presale.views.oidc_op
 import pretix.presale.views.order
 import pretix.presale.views.organizer
 import pretix.presale.views.robots
@@ -72,6 +74,7 @@ frame_wrapped_urls = [
     re_path(r'^waitinglist', pretix.presale.views.waiting.WaitingView.as_view(), name='event.waitinglist'),
     re_path(r'^$', pretix.presale.views.event.EventIndex.as_view(), name='event.index'),
 ]
+
 event_patterns = [
     # Cart/checkout patterns are a bit more complicated, as they should have simple URLs like cart/clear in normal
     # cases, but need to have versions with unguessable URLs like w/8l4Y83XNonjLxoBb/cart/clear to be used in widget
@@ -92,6 +95,10 @@ event_patterns = [
     re_path(r'unlock/(?P<hash>[a-z0-9]{64})/$', pretix.presale.views.user.UnlockHashView.as_view(),
             name='event.payment.unlock'),
     re_path(r'resend/$', pretix.presale.views.user.ResendLinkView.as_view(), name='event.resend_link'),
+
+    re_path(r'^favicon.ico/?$',
+            pretix.presale.views.organizer.OrganizerFavicon.as_view(),
+            name='event.favicon'),
 
     re_path(r'^order/(?P<order>[^/]+)/(?P<secret>[A-Za-z0-9]+)/open/(?P<hash>[a-z0-9]+)/$', pretix.presale.views.order.OrderOpen.as_view(),
             name='event.order.open'),
@@ -143,6 +150,9 @@ event_patterns = [
     re_path(r'^ticket/(?P<order>[^/]+)/(?P<position>\d+)/(?P<secret>[A-Za-z0-9]+)/download/(?P<pid>[0-9]+)/(?P<output>[^/]+)$',
             pretix.presale.views.order.OrderPositionDownload.as_view(),
             name='event.order.position.download'),
+    re_path(r'^ticket/(?P<order>[^/]+)/(?P<position>\d+)/(?P<secret>[A-Za-z0-9]+)/change$',
+            pretix.presale.views.order.OrderPositionChange.as_view(),
+            name='event.order.position.change'),
 
     re_path(r'^ical/?$',
             pretix.presale.views.event.EventIcalDownload.as_view(),
@@ -164,12 +174,19 @@ event_patterns = [
 
 organizer_patterns = [
     re_path(r'^$', pretix.presale.views.organizer.OrganizerIndex.as_view(), name='organizer.index'),
+    re_path(r'^favicon.ico/?$',
+            pretix.presale.views.organizer.OrganizerFavicon.as_view(),
+            name='organizer.favicon'),
     re_path(r'^events/ical/$',
             pretix.presale.views.organizer.OrganizerIcalDownload.as_view(),
             name='organizer.ical'),
+
     re_path(r'^widget/product_list$', pretix.presale.views.widget.WidgetAPIProductList.as_view(),
             name='organizer.widget.productlist'),
     re_path(r'^widget/v1.css$', pretix.presale.views.widget.widget_css, name='organizer.widget.css'),
+
+    re_path(r'^account/login/(?P<provider>[0-9]+)/$', pretix.presale.views.customer.SSOLoginView.as_view(), name='organizer.customer.login'),
+    re_path(r'^account/login/(?P<provider>[0-9]+)/return$', pretix.presale.views.customer.SSOLoginReturnView.as_view(), name='organizer.customer.login.return'),
     re_path(r'^account/login$', pretix.presale.views.customer.LoginView.as_view(), name='organizer.customer.login'),
     re_path(r'^account/logout$', pretix.presale.views.customer.LogoutView.as_view(), name='organizer.customer.logout'),
     re_path(r'^account/register$', pretix.presale.views.customer.RegistrationView.as_view(), name='organizer.customer.register'),
@@ -183,6 +200,17 @@ organizer_patterns = [
     re_path(r'^account/addresses/(?P<id>\d+)/delete$', pretix.presale.views.customer.AddressDeleteView.as_view(), name='organizer.customer.address.delete'),
     re_path(r'^account/profiles/(?P<id>\d+)/delete$', pretix.presale.views.customer.ProfileDeleteView.as_view(), name='organizer.customer.profile.delete'),
     re_path(r'^account/$', pretix.presale.views.customer.ProfileView.as_view(), name='organizer.customer.profile'),
+
+    re_path(r'^oauth2/v1/authorize$', pretix.presale.views.oidc_op.AuthorizeView.as_view(),
+            name='organizer.oauth2.v1.authorize'),
+    re_path(r'^oauth2/v1/token$', pretix.presale.views.oidc_op.TokenView.as_view(),
+            name='organizer.oauth2.v1.token'),
+    re_path(r'^oauth2/v1/userinfo$', pretix.presale.views.oidc_op.UserInfoView.as_view(),
+            name='organizer.oauth2.v1.userinfo'),
+    re_path(r'^oauth2/v1/keys$', pretix.presale.views.oidc_op.KeysView.as_view(),
+            name='organizer.oauth2.v1.jwks'),
+    re_path(r'^.well-known/openid-configuration$', pretix.presale.views.oidc_op.ConfigurationView.as_view(),
+            name='organizer.oauth2.v1.configuration'),
 ]
 
 locale_patterns = [

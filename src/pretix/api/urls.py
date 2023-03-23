@@ -35,14 +35,16 @@
 import importlib
 
 from django.apps import apps
-from django.conf.urls import include, re_path
+from django.conf.urls import re_path
+from django.urls import include
 from rest_framework import routers
 
 from pretix.api.views import cart
 
 from .views import (
-    checkin, device, discount, event, exporters, item, oauth, order, organizer,
-    upload, user, version, voucher, waitinglist, webhooks,
+    checkin, device, discount, event, exporters, idempotency, item, oauth,
+    order, organizer, shredders, upload, user, version, voucher, waitinglist,
+    webhooks,
 )
 
 router = routers.DefaultRouter()
@@ -79,11 +81,13 @@ event_router.register(r'orders', order.OrderViewSet)
 event_router.register(r'orderpositions', order.OrderPositionViewSet)
 event_router.register(r'invoices', order.InvoiceViewSet)
 event_router.register(r'revokedsecrets', order.RevokedSecretViewSet, basename='revokedsecrets')
+event_router.register(r'blockedsecrets', order.BlockedSecretViewSet, basename='blockedsecrets')
 event_router.register(r'taxrules', event.TaxRuleViewSet)
 event_router.register(r'waitinglistentries', waitinglist.WaitingListViewSet)
 event_router.register(r'checkinlists', checkin.CheckinListViewSet)
 event_router.register(r'cartpositions', cart.CartPositionViewSet)
 event_router.register(r'exporters', exporters.EventExportersViewSet, basename='exporters')
+event_router.register(r'shredders', shredders.EventShreddersViewSet, basename='shredders')
 
 checkinlist_router = routers.DefaultRouter()
 checkinlist_router.register(r'positions', checkin.CheckinListPositionViewSet, basename='checkinlistpos')
@@ -112,6 +116,10 @@ for app in apps.get_app_configs():
 urlpatterns = [
     re_path(r'^', include(router.urls)),
     re_path(r'^organizers/(?P<organizer>[^/]+)/', include(orga_router.urls)),
+    re_path(r'^organizers/(?P<organizer>[^/]+)/checkinrpc/redeem/$', checkin.CheckinRPCRedeemView.as_view(),
+            name="checkinrpc.redeem"),
+    re_path(r'^organizers/(?P<organizer>[^/]+)/checkinrpc/search/$', checkin.CheckinRPCSearchView.as_view(),
+            name="checkinrpc.search"),
     re_path(r'^organizers/(?P<organizer>[^/]+)/settings/$', organizer.OrganizerSettingsView.as_view(),
             name="organizer.settings"),
     re_path(r'^organizers/(?P<organizer>[^/]+)/giftcards/(?P<giftcard>[^/]+)/', include(giftcard_router.urls)),
@@ -132,7 +140,9 @@ urlpatterns = [
     re_path(r"^device/update$", device.UpdateView.as_view(), name="device.update"),
     re_path(r"^device/roll$", device.RollKeyView.as_view(), name="device.roll"),
     re_path(r"^device/revoke$", device.RevokeKeyView.as_view(), name="device.revoke"),
+    re_path(r"^device/info$", device.InfoView.as_view(), name="device.info"),
     re_path(r"^device/eventselection$", device.EventSelectionView.as_view(), name="device.eventselection"),
+    re_path(r"^idempotency_query$", idempotency.IdempotencyQueryView.as_view(), name="idempotency.query"),
     re_path(r"^upload$", upload.UploadView.as_view(), name="upload"),
     re_path(r"^me$", user.MeView.as_view(), name="user.me"),
     re_path(r"^version$", version.VersionView.as_view(), name="version"),

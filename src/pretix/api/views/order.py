@@ -27,7 +27,9 @@ from decimal import Decimal
 import django_filters
 import pytz
 from django.db import transaction
-from django.db.models import Exists, F, OuterRef, Prefetch, Q, Subquery
+from django.db.models import (
+    Exists, F, OuterRef, Prefetch, Q, Subquery, prefetch_related_objects,
+)
 from django.db.models.functions import Coalesce, Concat
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
@@ -41,31 +43,36 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import (
     APIException, NotFound, PermissionDenied, ValidationError,
 )
-from rest_framework.filters import OrderingFilter
 from rest_framework.mixins import CreateModelMixin
 from rest_framework.response import Response
 
 from pretix.api.models import OAuthAccessToken
+from pretix.api.pagination import TotalOrderingFilter
 from pretix.api.serializers.order import (
-    InvoiceSerializer, OrderCreateSerializer, OrderPaymentCreateSerializer,
-    OrderPaymentSerializer, OrderPositionSerializer,
-    OrderRefundCreateSerializer, OrderRefundSerializer, OrderSerializer,
-    PriceCalcSerializer, RevokedTicketSecretSerializer,
-    SimulatedOrderSerializer,
+    BlockedTicketSecretSerializer, InvoiceSerializer, OrderCreateSerializer,
+    OrderPaymentCreateSerializer, OrderPaymentSerializer,
+    OrderPositionSerializer, OrderRefundCreateSerializer,
+    OrderRefundSerializer, OrderSerializer, PriceCalcSerializer,
+    RevokedTicketSecretSerializer, SimulatedOrderSerializer,
 )
 from pretix.api.serializers.orderchange import (
-    OrderChangeOperationSerializer, OrderFeeChangeSerializer,
-    OrderPositionChangeSerializer,
+    BlockNameSerializer, OrderChangeOperationSerializer,
+    OrderFeeChangeSerializer, OrderPositionChangeSerializer,
     OrderPositionCreateForExistingOrderSerializer,
     OrderPositionInfoPatchSerializer,
 )
+from pretix.api.views import RichOrderingFilter
 from pretix.base.i18n import language
 from pretix.base.models import (
-    CachedCombinedTicket, CachedTicket, Checkin, Device, Event, Invoice,
-    InvoiceAddress, Order, OrderFee, OrderPayment, OrderPosition, OrderRefund,
-    Quota, SubEvent, TaxRule, TeamAPIToken, generate_secret,
+    CachedCombinedTicket, CachedTicket, Checkin, Device, EventMetaValue,
+    Invoice, InvoiceAddress, ItemMetaValue, ItemVariation,
+    ItemVariationMetaValue, Order, OrderFee, OrderPayment, OrderPosition,
+    OrderRefund, Quota, SubEvent, SubEventMetaValue, TaxRule, TeamAPIToken,
+    generate_secret,
 )
-from pretix.base.models.orders import QuestionAnswer, RevokedTicketSecret
+from pretix.base.models.orders import (
+    BlockedTicketSecret, QuestionAnswer, RevokedTicketSecret,
+)
 from pretix.base.payment import PaymentException
 from pretix.base.pdf import get_images
 from pretix.base.secrets import assign_ticket_secret
@@ -98,9 +105,9 @@ with scopes_disabled():
         subevent_after = django_filters.IsoDateTimeFilter(method='subevent_after_qs')
         subevent_before = django_filters.IsoDateTimeFilter(method='subevent_before_qs')
         search = django_filters.CharFilter(method='search_qs')
-        item = django_filters.CharFilter(field_name='all_positions', lookup_expr='item_id')
-        variation = django_filters.CharFilter(field_name='all_positions', lookup_expr='variation_id')
-        subevent = django_filters.CharFilter(field_name='all_positions', lookup_expr='subevent_id')
+        item = django_filters.CharFilter(field_name='all_positions', lookup_expr='item_id', distinct=True)
+        variation = django_filters.CharFilter(field_name='all_positions', lookup_expr='variation_id', distinct=True)
+        subevent = django_filters.CharFilter(field_name='all_positions', lookup_expr='subevent_id', distinct=True)
 
         class Meta:
             model = Order
@@ -174,7 +181,7 @@ with scopes_disabled():
 class OrderViewSet(viewsets.ModelViewSet):
     serializer_class = OrderSerializer
     queryset = Order.objects.none()
-    filter_backends = (DjangoFilterBackend, OrderingFilter)
+    filter_backends = (DjangoFilterBackend, TotalOrderingFilter)
     ordering = ('datetime',)
     ordering_fields = ('datetime', 'code', 'status', 'last_modified')
     filterset_class = OrderFilter
@@ -185,6 +192,9 @@ class OrderViewSet(viewsets.ModelViewSet):
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx['event'] = self.request.event
+        ctx['pdf_data'] = self.request.query_params.get('pdf_data', 'false') == 'true'
+        ctx['exclude'] = self.request.query_params.getlist('exclude')
+        ctx['include'] = self.request.query_params.getlist('include')
         return ctx
 
     def get_queryset(self):
@@ -202,36 +212,51 @@ class OrderViewSet(viewsets.ModelViewSet):
         if 'invoice_address' not in self.request.GET.getlist('exclude'):
             qs = qs.select_related('invoice_address')
 
-        if self.request.query_params.get('include_canceled_positions', 'false') == 'true':
+        qs = qs.prefetch_related(self._positions_prefetch(self.request))
+        return qs
+
+    def _positions_prefetch(self, request):
+        if request.query_params.get('include_canceled_positions', 'false') == 'true':
             opq = OrderPosition.all
         else:
             opq = OrderPosition.objects
-        if self.request.query_params.get('pdf_data', 'false') == 'true':
-            qs = qs.prefetch_related(
-                Prefetch(
-                    'positions',
-                    opq.all().prefetch_related(
-                        Prefetch('checkins', queryset=Checkin.objects.all()),
-                        'item', 'variation', 'answers', 'answers__options', 'answers__question',
-                        'item__category', 'addon_to', 'seat',
-                        Prefetch('addons', opq.select_related('item', 'variation', 'seat'))
-                    )
-                )
+        if request.query_params.get('pdf_data', 'false') == 'true':
+            prefetch_related_objects([request.organizer], 'meta_properties')
+            prefetch_related_objects(
+                [request.event],
+                Prefetch('meta_values', queryset=EventMetaValue.objects.select_related('property'), to_attr='meta_values_cached'),
+                'questions',
+                'item_meta_properties',
+            )
+            return Prefetch(
+                'positions',
+                opq.all().prefetch_related(
+                    Prefetch('checkins', queryset=Checkin.objects.all()),
+                    Prefetch('item', queryset=self.request.event.items.prefetch_related(
+                        Prefetch('meta_values', ItemMetaValue.objects.select_related('property'), to_attr='meta_values_cached')
+                    )),
+                    Prefetch('variation', queryset=ItemVariation.objects.prefetch_related(
+                        Prefetch('meta_values', ItemVariationMetaValue.objects.select_related('property'), to_attr='meta_values_cached')
+                    )),
+                    'answers', 'answers__options', 'answers__question',
+                    'item__category',
+                    'addon_to__answers', 'addon_to__answers__options', 'addon_to__answers__question',
+                    Prefetch('subevent', queryset=self.request.event.subevents.prefetch_related(
+                        Prefetch('meta_values', to_attr='meta_values_cached', queryset=SubEventMetaValue.objects.select_related('property'))
+                    )),
+                    Prefetch('addons', opq.select_related('item', 'variation', 'seat'))
+                ).select_related('seat', 'addon_to', 'addon_to__seat')
             )
         else:
-            qs = qs.prefetch_related(
-                Prefetch(
-                    'positions',
-                    opq.all().prefetch_related(
-                        Prefetch('checkins', queryset=Checkin.objects.all()),
-                        'item', 'variation',
-                        Prefetch('answers', queryset=QuestionAnswer.objects.prefetch_related('options', 'question').order_by('question__position')),
-                        'seat',
-                    )
+            return Prefetch(
+                'positions',
+                opq.all().prefetch_related(
+                    Prefetch('checkins', queryset=Checkin.objects.all()),
+                    'item', 'variation',
+                    Prefetch('answers', queryset=QuestionAnswer.objects.prefetch_related('options', 'question').order_by('question__position')),
+                    'seat',
                 )
             )
-
-        return qs
 
     def _get_output_provider(self, identifier):
         responses = register_ticket_outputs.send(self.request.event)
@@ -261,8 +286,11 @@ class OrderViewSet(viewsets.ModelViewSet):
         provider = self._get_output_provider(output)
         order = self.get_object()
 
-        if order.status != Order.STATUS_PAID:
-            raise PermissionDenied("Downloads are not available for unpaid orders.")
+        if order.status in (Order.STATUS_CANCELED, Order.STATUS_EXPIRED):
+            raise PermissionDenied("Downloads are not available for canceled or expired orders.")
+
+        if order.status == Order.STATUS_PENDING and not (order.valid_if_pending or request.event.settings.ticket_download_pending):
+            raise PermissionDenied("Downloads are not available for pending orders.")
 
         ct = CachedCombinedTicket.objects.filter(
             order=order, provider=provider.identifier, file__isnull=False
@@ -616,6 +644,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 serializer = SimulatedOrderSerializer(order, context=serializer.context)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             else:
+                prefetch_related_objects([order], self._positions_prefetch(request))
                 serializer = OrderSerializer(order, context=serializer.context)
 
             order.log_action(
@@ -657,28 +686,33 @@ class OrderViewSet(viewsets.ModelViewSet):
                 )
                 if order.require_approval:
                     email_template = request.event.settings.mail_text_order_placed_require_approval
+                    subject_template = request.event.settings.mail_subject_order_placed_require_approval
                     log_entry = 'pretix.event.order.email.order_placed_require_approval'
                     email_attendees = False
                 elif free_flow:
                     email_template = request.event.settings.mail_text_order_free
+                    subject_template = request.event.settings.mail_subject_order_free
                     log_entry = 'pretix.event.order.email.order_free'
                     email_attendees = request.event.settings.mail_send_order_free_attendee
                     email_attendees_template = request.event.settings.mail_text_order_free_attendee
+                    subject_attendees_template = request.event.settings.mail_subject_order_free_attendee
                 else:
                     email_template = request.event.settings.mail_text_order_placed
+                    subject_template = request.event.settings.mail_subject_order_placed
                     log_entry = 'pretix.event.order.email.order_placed'
                     email_attendees = request.event.settings.mail_send_order_placed_attendee
                     email_attendees_template = request.event.settings.mail_text_order_placed_attendee
+                    subject_attendees_template = request.event.settings.mail_subject_order_placed_attendee
 
                 _order_placed_email(
-                    request.event, order, payment.payment_provider if payment else None, email_template,
-                    log_entry, invoice, payment, is_free=free_flow
+                    request.event, order, email_template, subject_template,
+                    log_entry, invoice, [payment] if payment else [], is_free=free_flow
                 )
                 if email_attendees:
                     for p in order.positions.all():
                         if p.addon_to_id is None and p.attendee_email and p.attendee_email != order.email:
-                            _order_placed_email_attendee(request.event, order, p, email_attendees_template, log_entry,
-                                                         is_free=free_flow)
+                            _order_placed_email_attendee(request.event, order, p, email_attendees_template, subject_attendees_template,
+                                                         log_entry, is_free=free_flow)
 
                 if not free_flow and order.status == Order.STATUS_PAID and payment:
                     payment._send_paid_mail(invoice, None, '')
@@ -728,6 +762,16 @@ class OrderViewSet(viewsets.ModelViewSet):
                     auth=self.request.auth,
                     data={
                         'new_value': self.request.data.get('checkin_attention')
+                    }
+                )
+
+            if 'valid_if_pending' in self.request.data and serializer.instance.valid_if_pending != self.request.data.get('valid_if_pending'):
+                serializer.instance.log_action(
+                    'pretix.event.order.valid_if_pending',
+                    user=self.request.user,
+                    auth=self.request.auth,
+                    data={
+                        'new_value': self.request.data.get('valid_if_pending')
                     }
                 )
 
@@ -908,7 +952,7 @@ with scopes_disabled():
 class OrderPositionViewSet(viewsets.ModelViewSet):
     serializer_class = OrderPositionSerializer
     queryset = OrderPosition.all.none()
-    filter_backends = (DjangoFilterBackend, OrderingFilter)
+    filter_backends = (DjangoFilterBackend, RichOrderingFilter)
     ordering = ('order__datetime', 'positionid')
     ordering_fields = ('order__code', 'order__datetime', 'positionid', 'attendee_name', 'order__status',)
     filterset_class = OrderPositionFilter
@@ -928,6 +972,7 @@ class OrderPositionViewSet(viewsets.ModelViewSet):
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx['event'] = self.request.event
+        ctx['pdf_data'] = self.request.query_params.get('pdf_data', 'false') == 'true'
         return ctx
 
     def get_queryset(self):
@@ -938,25 +983,53 @@ class OrderPositionViewSet(viewsets.ModelViewSet):
 
         qs = qs.filter(order__event=self.request.event)
         if self.request.query_params.get('pdf_data', 'false') == 'true':
+            prefetch_related_objects([self.request.organizer], 'meta_properties')
+            prefetch_related_objects(
+                [self.request.event],
+                Prefetch('meta_values', queryset=EventMetaValue.objects.select_related('property'), to_attr='meta_values_cached'),
+                'questions',
+                'item_meta_properties',
+            )
             qs = qs.prefetch_related(
                 Prefetch('checkins', queryset=Checkin.objects.all()),
+                Prefetch('item', queryset=self.request.event.items.prefetch_related(
+                    Prefetch('meta_values', ItemMetaValue.objects.select_related('property'),
+                             to_attr='meta_values_cached')
+                )),
+                'variation',
                 'answers', 'answers__options', 'answers__question',
+                'item__category',
+                'addon_to__answers', 'addon_to__answers__options', 'addon_to__answers__question',
                 Prefetch('addons', qs.select_related('item', 'variation')),
-                Prefetch('order', Order.objects.select_related('invoice_address').prefetch_related(
-                    Prefetch(
-                        'event',
-                        Event.objects.select_related('organizer')
-                    ),
+                Prefetch('subevent', queryset=self.request.event.subevents.prefetch_related(
+                    Prefetch('meta_values', to_attr='meta_values_cached',
+                             queryset=SubEventMetaValue.objects.select_related('property'))
+                )),
+                Prefetch('order', self.request.event.orders.select_related('invoice_address').prefetch_related(
                     Prefetch(
                         'positions',
                         qs.prefetch_related(
-                            'item', 'variation', 'answers', 'answers__options', 'answers__question',
                             Prefetch('checkins', queryset=Checkin.objects.all()),
-                        )
+                            Prefetch('item', queryset=self.request.event.items.prefetch_related(
+                                Prefetch('meta_values', ItemMetaValue.objects.select_related('property'),
+                                         to_attr='meta_values_cached')
+                            )),
+                            Prefetch('variation', queryset=self.request.event.items.prefetch_related(
+                                Prefetch('meta_values', ItemVariationMetaValue.objects.select_related('property'),
+                                         to_attr='meta_values_cached')
+                            )),
+                            'answers', 'answers__options', 'answers__question',
+                            'item__category',
+                            Prefetch('subevent', queryset=self.request.event.subevents.prefetch_related(
+                                Prefetch('meta_values', to_attr='meta_values_cached',
+                                         queryset=SubEventMetaValue.objects.select_related('property'))
+                            )),
+                            Prefetch('addons', qs.select_related('item', 'variation', 'seat'))
+                        ).select_related('addon_to', 'seat', 'addon_to__seat')
                     )
                 ))
             ).select_related(
-                'item', 'variation', 'item__category', 'addon_to', 'seat'
+                'addon_to', 'seat', 'addon_to__seat'
             )
         else:
             qs = qs.prefetch_related(
@@ -1119,8 +1192,11 @@ class OrderPositionViewSet(viewsets.ModelViewSet):
         provider = self._get_output_provider(output)
         pos = self.get_object()
 
-        if pos.order.status != Order.STATUS_PAID:
-            raise PermissionDenied("Downloads are not available for unpaid orders.")
+        if pos.order.status in (Order.STATUS_CANCELED, Order.STATUS_EXPIRED):
+            raise PermissionDenied("Downloads are not available for canceled or expired orders.")
+
+        if pos.order.status == Order.STATUS_PENDING and not (pos.order.valid_if_pending or request.event.settings.ticket_download_pending):
+            raise PermissionDenied("Downloads are not available for pending orders.")
         if not pos.generate_ticket:
             raise PermissionDenied("Downloads are not enabled for this product.")
 
@@ -1154,6 +1230,54 @@ class OrderPositionViewSet(viewsets.ModelViewSet):
                 reissue_invoice=False,
             )
             ocm.regenerate_secret(instance)
+            ocm.commit()
+        except OrderError as e:
+            raise ValidationError(str(e))
+        except Quota.QuotaExceededException as e:
+            raise ValidationError(str(e))
+        return self.retrieve(request, [], **kwargs)
+
+    @action(detail=True, methods=['POST'])
+    def add_block(self, request, **kwargs):
+        serializer = BlockNameSerializer(
+            data=request.data,
+            context=self.get_serializer_context(),
+        )
+        serializer.is_valid(raise_exception=True)
+        instance = self.get_object()
+        try:
+            ocm = OrderChangeManager(
+                instance.order,
+                user=self.request.user if self.request.user.is_authenticated else None,
+                auth=self.request.auth,
+                notify=False,
+                reissue_invoice=False,
+            )
+            ocm.add_block(instance, serializer.validated_data['name'])
+            ocm.commit()
+        except OrderError as e:
+            raise ValidationError(str(e))
+        except Quota.QuotaExceededException as e:
+            raise ValidationError(str(e))
+        return self.retrieve(request, [], **kwargs)
+
+    @action(detail=True, methods=['POST'])
+    def remove_block(self, request, **kwargs):
+        serializer = BlockNameSerializer(
+            data=request.data,
+            context=self.get_serializer_context(),
+        )
+        serializer.is_valid(raise_exception=True)
+        instance = self.get_object()
+        try:
+            ocm = OrderChangeManager(
+                instance.order,
+                user=self.request.user if self.request.user.is_authenticated else None,
+                auth=self.request.auth,
+                notify=False,
+                reissue_invoice=False,
+            )
+            ocm.remove_block(instance, serializer.validated_data['name'])
             ocm.commit()
         except OrderError as e:
             raise ValidationError(str(e))
@@ -1383,7 +1507,7 @@ class PaymentViewSet(CreateModelMixin, viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['POST'])
     def refund(self, request, **kwargs):
         payment = self.get_object()
-        amount = serializers.DecimalField(max_digits=10, decimal_places=2).to_internal_value(
+        amount = serializers.DecimalField(max_digits=13, decimal_places=2).to_internal_value(
             request.data.get('amount', str(payment.amount))
         )
         if 'mark_refunded' in request.data:
@@ -1415,21 +1539,27 @@ class PaymentViewSet(CreateModelMixin, viewsets.ReadOnlyModelViewSet):
             source=OrderRefund.REFUND_SOURCE_ADMIN,
             state=OrderRefund.REFUND_STATE_CREATED,
             amount=amount,
-            provider=payment.provider
+            provider=payment.provider,
+            info='{}',
         )
+        payment.order.log_action('pretix.event.order.refund.created', {
+            'local_id': r.local_id,
+            'provider': r.provider,
+        }, user=self.request.user if self.request.user.is_authenticated else None, auth=self.request.auth)
 
         try:
             r.payment_provider.execute_refund(r)
         except PaymentException as e:
             r.state = OrderRefund.REFUND_STATE_FAILED
             r.save()
+            payment.order.log_action('pretix.event.order.refund.failed', {
+                'local_id': r.local_id,
+                'provider': r.provider,
+                'error': str(e)
+            })
             return Response({'detail': 'External error: {}'.format(str(e))},
                             status=status.HTTP_400_BAD_REQUEST)
         else:
-            payment.order.log_action('pretix.event.order.refund.created', {
-                'local_id': r.local_id,
-                'provider': r.provider,
-            }, user=self.request.user if self.request.user.is_authenticated else None, auth=self.request.auth)
             if payment.order.pending_sum > 0:
                 if mark_refunded:
                     mark_order_refunded(payment.order,
@@ -1554,6 +1684,17 @@ class RefundViewSet(CreateModelMixin, viewsets.ReadOnlyModelViewSet):
                 user=request.user if request.user.is_authenticated else None,
                 auth=request.auth
             )
+
+            if r.state in (OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_CANCELED, OrderRefund.REFUND_STATE_FAILED):
+                r.order.log_action(
+                    f'pretix.event.order.refund.{r.state}', {
+                        'local_id': r.local_id,
+                        'provider': r.provider,
+                    },
+                    user=request.user if request.user.is_authenticated else None,
+                    auth=request.auth
+                )
+
             if mark_refunded:
                 try:
                     mark_order_refunded(
@@ -1608,7 +1749,7 @@ class RetryException(APIException):
 class InvoiceViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = InvoiceSerializer
     queryset = Invoice.objects.none()
-    filter_backends = (DjangoFilterBackend, OrderingFilter)
+    filter_backends = (DjangoFilterBackend, TotalOrderingFilter)
     ordering = ('nr',)
     ordering_fields = ('nr', 'date')
     filterset_class = InvoiceFilter
@@ -1701,7 +1842,7 @@ with scopes_disabled():
 class RevokedSecretViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = RevokedTicketSecretSerializer
     queryset = RevokedTicketSecret.objects.none()
-    filter_backends = (DjangoFilterBackend, OrderingFilter)
+    filter_backends = (DjangoFilterBackend, TotalOrderingFilter)
     ordering = ('-created',)
     ordering_fields = ('created', 'secret')
     filterset_class = RevokedSecretFilter
@@ -1710,3 +1851,25 @@ class RevokedSecretViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return RevokedTicketSecret.objects.filter(event=self.request.event)
+
+
+with scopes_disabled():
+    class BlockedSecretFilter(FilterSet):
+        updated_since = django_filters.IsoDateTimeFilter(field_name='updated', lookup_expr='gte')
+
+        class Meta:
+            model = BlockedTicketSecret
+            fields = ['blocked']
+
+
+class BlockedSecretViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = BlockedTicketSecretSerializer
+    queryset = BlockedTicketSecret.objects.none()
+    filter_backends = (DjangoFilterBackend, TotalOrderingFilter)
+    ordering = ('-updated', '-pk')
+    filterset_class = BlockedSecretFilter
+    permission = 'can_view_orders'
+    write_permission = 'can_change_orders'
+
+    def get_queryset(self):
+        return BlockedTicketSecret.objects.filter(event=self.request.event)

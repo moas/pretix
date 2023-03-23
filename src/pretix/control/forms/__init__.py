@@ -48,7 +48,12 @@ from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 from django_scopes.forms import SafeModelMultipleChoiceField
 
+from pretix.helpers.hierarkey import clean_filename
+
 from ...base.forms import I18nModelForm
+from ...helpers.images import (
+    IMAGE_EXTS, validate_uploaded_file_for_valid_image,
+)
 
 # Import for backwards compatibility with okd import paths
 from ...base.forms.widgets import (  # noqa
@@ -127,7 +132,7 @@ class ClearableBasenameFileInput(forms.ClearableFileInput):
         def __str__(self):
             if hasattr(self.file, 'display_name'):
                 return self.file.display_name
-            return os.path.basename(self.file.name).split('.', 1)[-1]
+            return clean_filename(os.path.basename(self.file.name))
 
         @property
         def url(self):
@@ -212,12 +217,16 @@ class ExtValidationMixin:
 
     def clean(self, *args, **kwargs):
         data = super().clean(*args, **kwargs)
-        if isinstance(data, File):
+        if isinstance(data, UploadedFile):
             filename = data.name
             ext = os.path.splitext(filename)[1]
             ext = ext.lower()
             if ext not in self.ext_whitelist:
                 raise forms.ValidationError(_("Filetype not allowed!"))
+
+            if ext in IMAGE_EXTS:
+                validate_uploaded_file_for_valid_image(data)
+
         return data
 
 

@@ -35,6 +35,7 @@
 import json
 import mimetypes
 import os
+import urllib
 from decimal import Decimal
 from urllib.parse import quote
 
@@ -48,7 +49,7 @@ from django.utils import translation
 from django.utils.crypto import get_random_string
 from django.utils.decorators import method_decorator
 from django.utils.functional import cached_property
-from django.utils.http import is_safe_url, url_has_allowed_host_and_scheme
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.timezone import now
 from django.utils.translation import gettext as _, pgettext
 from django.views.decorators.clickjacking import xframe_options_exempt
@@ -63,6 +64,7 @@ from pretix.base.services.cart import (
     remove_cart_position,
 )
 from pretix.base.views.tasks import AsyncAction
+from pretix.helpers.http import redirect_to_url
 from pretix.multidomain.urlreverse import eventreverse
 from pretix.presale.views import (
     CartMixin, EventViewMixin, allow_cors_if_namespaced,
@@ -82,30 +84,36 @@ except:
 class CartActionMixin:
 
     def get_next_url(self):
-        if "next" in self.request.GET and is_safe_url(self.request.GET.get("next"), allowed_hosts=None):
+        if "next" in self.request.GET and url_has_allowed_host_and_scheme(self.request.GET.get("next"), allowed_hosts=None):
             u = self.request.GET.get('next')
         else:
             kwargs = {}
             if 'cart_namespace' in self.kwargs:
                 kwargs['cart_namespace'] = self.kwargs['cart_namespace']
             u = eventreverse(self.request.event, 'presale:event.index', kwargs=kwargs)
-        if '?' in u:
-            u += '&require_cookie=true'
-        else:
-            u += '?require_cookie=true'
+
+        query = {'require_cookie': 'true'}
+
+        if 'locale' in self.request.GET:
+            query['locale'] = self.request.GET['locale']
         disclose_cart_id = (
             'iframe' in self.request.GET or settings.SESSION_COOKIE_NAME not in self.request.COOKIES
         ) and self.kwargs.get('cart_namespace')
         if disclose_cart_id:
             cart_id = get_or_create_cart_id(self.request)
-            u += '&cart_id={}'.format(cart_id)
+            query['cart_id'] = cart_id
+
+        if '?' in u:
+            u += '&' + urllib.parse.urlencode(query)
+        else:
+            u += '?' + urllib.parse.urlencode(query)
         return u
 
     def get_success_url(self, value=None):
         return self.get_next_url()
 
     def get_error_url(self):
-        if "next_error" in self.request.GET and is_safe_url(self.request.GET.get("next_error"), allowed_hosts=None):
+        if "next_error" in self.request.GET and url_has_allowed_host_and_scheme(self.request.GET.get("next_error"), allowed_hosts=None):
             u = self.request.GET.get('next_error')
             if '?' in u:
                 u += '&require_cookie=true'
@@ -136,7 +144,7 @@ class CartActionMixin:
         except InvoiceAddress.DoesNotExist:
             return InvoiceAddress()
 
-    def _item_from_post_value(self, key, value, voucher=None):
+    def _item_from_post_value(self, key, value, voucher=None, voucher_ignore_if_redeemed=False):
         if value.strip() == '' or '_' not in key:
             return
 
@@ -161,6 +169,7 @@ class CartActionMixin:
                     'seat': value,
                     'price': price,
                     'voucher': voucher,
+                    'voucher_ignore_if_redeemed': voucher_ignore_if_redeemed,
                     'subevent': subevent
                 }
             except ValueError:
@@ -183,6 +192,7 @@ class CartActionMixin:
                     'count': amount,
                     'price': price,
                     'voucher': voucher,
+                    'voucher_ignore_if_redeemed': voucher_ignore_if_redeemed,
                     'subevent': subevent
                 }
             except ValueError:
@@ -195,6 +205,7 @@ class CartActionMixin:
                     'count': amount,
                     'price': price,
                     'voucher': voucher,
+                    'voucher_ignore_if_redeemed': voucher_ignore_if_redeemed,
                     'subevent': subevent
                 }
             except ValueError:
@@ -219,7 +230,8 @@ class CartActionMixin:
         for key, values in req_items:
             for value in values:
                 try:
-                    item = self._item_from_post_value(key, value, self.request.POST.get('_voucher_code'))
+                    item = self._item_from_post_value(key, value, self.request.POST.get('_voucher_code'),
+                                                      voucher_ignore_if_redeemed=self.request.POST.get('_voucher_ignore_if_redeemed') == 'on')
                 except CartError as e:
                     messages.error(self.request, str(e))
                     return
@@ -353,7 +365,8 @@ def get_or_create_cart_id(request, create=True):
         if cart_invalidated:
             # This cart was created with a login but the person is now logged out.
             # Destroy the cart for privacy protection.
-            request.session['carts'][current_id] = {}
+            if 'carts' in request.session:
+                request.session['carts'][current_id] = {}
         else:
             return current_id
 
@@ -483,6 +496,8 @@ class CartAdd(EventViewMixin, CartActionMixin, AsyncAction, View):
         u = super().get_check_url(task_id, ajax)
         if "next" in self.request.GET:
             u += "&next=" + quote(self.request.GET.get('next'))
+        if "locale" in self.request.GET and "locale=" not in u:
+            u += "&locale=" + quote(self.request.GET.get('locale'))
         if "next_error" in self.request.GET:
             u += "&next_error=" + quote(self.request.GET.get('next_error'))
         if ajax:
@@ -519,7 +534,7 @@ class CartAdd(EventViewMixin, CartActionMixin, AsyncAction, View):
                 return JsonResponse({
                     'redirect': self.get_error_url(),
                     'success': False,
-                    'message': _(error_messages['empty'])
+                    'message': str(error_messages['empty'])
                 })
             else:
                 return redirect(self.get_error_url())
@@ -591,8 +606,6 @@ class RedeemView(NoSearchIndexViewMixin, EventViewMixin, CartMixin, TemplateView
         return context
 
     def dispatch(self, request, *args, **kwargs):
-        from pretix.base.services.cart import error_messages
-
         err = None
         v = request.GET.get('voucher')
 
@@ -646,8 +659,8 @@ class RedeemView(NoSearchIndexViewMixin, EventViewMixin, CartMixin, TemplateView
             pass
 
         if err:
-            messages.error(request, _(err))
-            return redirect(self.get_next_url() + "?voucher_invalid")
+            messages.error(request, str(err))
+            return redirect_to_url(self.get_next_url() + "?voucher_invalid")
 
         return super().dispatch(request, *args, **kwargs)
 

@@ -25,21 +25,22 @@ from django.db import transaction
 from django.db.models import F, Q
 from django.utils.timezone import now
 from django_filters.rest_framework import (
-    BooleanFilter, DjangoFilterBackend, FilterSet,
+    BooleanFilter, CharFilter, DjangoFilterBackend, FilterSet,
 )
 from django_scopes import scopes_disabled
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
-from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 
+from pretix.api.pagination import TotalOrderingFilter
 from pretix.api.serializers.voucher import VoucherSerializer
 from pretix.base.models import Voucher
 
 with scopes_disabled():
     class VoucherFilter(FilterSet):
         active = BooleanFilter(method='filter_active')
+        code = CharFilter(lookup_expr='iexact')
 
         class Meta:
             model = Voucher
@@ -58,7 +59,7 @@ with scopes_disabled():
 class VoucherViewSet(viewsets.ModelViewSet):
     serializer_class = VoucherSerializer
     queryset = Voucher.objects.none()
-    filter_backends = (DjangoFilterBackend, OrderingFilter)
+    filter_backends = (DjangoFilterBackend, TotalOrderingFilter)
     ordering = ('id',)
     ordering_fields = ('id', 'code', 'max_usages', 'valid_until', 'value')
     filterset_class = VoucherFilter

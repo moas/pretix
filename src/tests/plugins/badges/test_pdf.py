@@ -39,12 +39,12 @@ from io import BytesIO
 import pytest
 from django.utils.timezone import now
 from django_scopes import scope
-from PyPDF2 import PdfFileReader
+from pypdf import PdfReader
 
 from pretix.base.models import (
     Event, Item, ItemVariation, Order, OrderPosition, Organizer,
 )
-from pretix.base.services.orders import OrderError
+from pretix.base.services.export import ExportError
 from pretix.plugins.badges.exporters import BadgeExporter
 
 
@@ -80,14 +80,14 @@ def test_generate_pdf(env):
     event, order, shirt = env
     event.badge_layouts.create(name="Default", default=True)
     e = BadgeExporter(event, organizer=event.organizer)
-    with pytest.raises(OrderError):
+    with pytest.raises(ExportError):
         e.render({
             'items': [shirt.pk],
             'rendering': 'one',
             'include_pending': False
         })
 
-    with pytest.raises(OrderError):
+    with pytest.raises(ExportError):
         e.render({
             'items': [],
             'rendering': 'one',
@@ -100,8 +100,8 @@ def test_generate_pdf(env):
         'include_pending': True
     })
     assert ftype == 'application/pdf'
-    pdf = PdfFileReader(BytesIO(buf))
-    assert pdf.numPages == 2
+    pdf = PdfReader(BytesIO(buf))
+    assert len(pdf.pages) == 2
 
 
 @pytest.mark.django_db
@@ -115,5 +115,5 @@ def test_generate_pdf_multi(env):
         'include_pending': True
     })
     assert ftype == 'application/pdf'
-    pdf = PdfFileReader(BytesIO(buf))
-    assert pdf.numPages == 1
+    pdf = PdfReader(BytesIO(buf))
+    assert len(pdf.pages) == 1

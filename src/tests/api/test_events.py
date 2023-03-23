@@ -33,7 +33,7 @@
 # License for the specific language governing permissions and limitations under the License.
 
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from unittest import mock
 
@@ -44,6 +44,7 @@ from django.utils.timezone import now
 from django_countries.fields import Country
 from django_scopes import scopes_disabled
 from pytz import UTC
+from tests.const import SAMPLE_PNG
 
 from pretix.base.models import (
     Event, InvoiceAddress, Order, OrderPosition, Organizer, SeatingPlan,
@@ -122,7 +123,8 @@ TEST_EVENT_RES = {
     'item_meta_properties': {
         'day': 'Monday',
     },
-    'sales_channels': ['web', 'bar', 'baz']
+    'sales_channels': ['web', 'bar', 'baz'],
+    'public_url': 'http://example.com/dummy/dummy/'
 }
 
 
@@ -153,6 +155,13 @@ def test_event_list(token_client, organizer, event):
     assert resp.status_code == 200
     assert [] == resp.data['results']
     resp = token_client.get('/api/v1/organizers/{}/events/?live=false'.format(organizer.slug))
+    assert resp.status_code == 200
+    assert [TEST_EVENT_RES] == resp.data['results']
+
+    resp = token_client.get('/api/v1/organizers/{}/events/?testmode=true'.format(organizer.slug))
+    assert resp.status_code == 200
+    assert [] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/?testmode=false'.format(organizer.slug))
     assert resp.status_code == 200
     assert [TEST_EVENT_RES] == resp.data['results']
 
@@ -372,6 +381,8 @@ def test_event_create(team, token_client, organizer, event, meta_prop):
     '/api/v1/organizers/{}/events/?clone_from={}',
 ])
 def test_event_create_with_clone(token_client, organizer, event, meta_prop, urlstyle):
+    event.date_admission = event.date_from - timedelta(hours=1)
+    event.save()
     resp = token_client.post(
         urlstyle.format(organizer.slug, event.slug),
         {
@@ -384,7 +395,7 @@ def test_event_create_with_clone(token_client, organizer, event, meta_prop, urls
             "currency": "EUR",
             "date_from": "2018-12-27T10:00:00Z",
             "date_to": "2018-12-28T10:00:00Z",
-            "date_admission": None,
+            "date_admission": "2018-12-27T08:00:00Z",
             "is_public": False,
             "presale_start": None,
             "presale_end": None,
@@ -407,6 +418,7 @@ def test_event_create_with_clone(token_client, organizer, event, meta_prop, urls
         assert cloned_event.plugins == 'pretix.plugins.ticketoutputpdf'
         assert cloned_event.is_public is False
         assert cloned_event.testmode
+        assert cloned_event.date_admission.isoformat() == "2018-12-27T08:00:00+00:00"
         assert organizer.events.get(slug="2030").meta_values.filter(
             property__name=meta_prop.name, value="Conference"
         ).exists()
@@ -438,7 +450,7 @@ def test_event_create_with_clone(token_client, organizer, event, meta_prop, urls
     assert resp.status_code == 201
     with scopes_disabled():
         cloned_event = Event.objects.get(organizer=organizer.pk, slug='2031')
-        assert cloned_event.plugins == "pretix.plugins.banktransfer,pretix.plugins.ticketoutputpdf"
+        assert cloned_event.plugins == event.plugins
         assert cloned_event.is_public is True
         assert organizer.events.get(slug="2031").meta_values.filter(
             property__name=meta_prop.name, value="Conference"
@@ -1348,7 +1360,7 @@ def test_patch_event_settings_file(token_client, organizer, event):
         '/api/v1/upload',
         data={
             'media_type': 'image/png',
-            'file': ContentFile('file.png', 'invalid png content')
+            'file': ContentFile(SAMPLE_PNG)
         },
         format='upload',
         HTTP_CONTENT_DISPOSITION='attachment; filename="file.png"',
@@ -1360,7 +1372,7 @@ def test_patch_event_settings_file(token_client, organizer, event):
         '/api/v1/upload',
         data={
             'media_type': 'application/pdf',
-            'file': ContentFile('file.pdf', 'invalid pdf content')
+            'file': ContentFile('invalid pdf content')
         },
         format='upload',
         HTTP_CONTENT_DISPOSITION='attachment; filename="file.pdf"',

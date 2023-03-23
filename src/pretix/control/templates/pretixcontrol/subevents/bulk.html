@@ -487,6 +487,7 @@
                 {% trans "These settings are optional, if you leave them empty, the default values from the product settings will be used." %}
             </p>
             {% for f in itemvar_forms %}
+                {% bootstrap_form_errors f %}
                 <div class="form-group subevent-itemvar-group">
                     <label class="col-md-3 control-label" for="id_{{ f.prefix }}-price">
                         {% if f.variation %}{{ f.item }} – {{ f.variation }}{% else %}{{ f.item }}{% endif %}
@@ -514,6 +515,16 @@
         </fieldset>
         <fieldset>
             <legend>{% trans "Check-in lists" %}</legend>
+            <p class="help-block">
+                {% blocktrans trimmed %}
+                    You can choose to either add one or more check-in lists for every date in your series individually,
+                    or use just one check-in list for all your dates and limit admission through check-in rules. Which
+                    approach is better depends on multiple factors, such as the number of dates in your series. For a
+                    series with one or less event date per day, individual lists are usually more helpful. If you
+                    use dates to represent many time slots on the same day, or even overlapping time slots, working with
+                    just one large check-in list will be easier.
+                {% endblocktrans %}
+            </p>
             <div class="formset" data-formset data-formset-prefix="{{ cl_formset.prefix }}">
                 {{ cl_formset.management_form }}
                 {% bootstrap_formset_errors cl_formset %}

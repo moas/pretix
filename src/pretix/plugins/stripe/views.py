@@ -35,6 +35,7 @@
 import hashlib
 import json
 import logging
+import urllib.parse
 
 import requests
 import stripe
@@ -63,7 +64,8 @@ from pretix.control.permissions import (
 )
 from pretix.control.views.event import DecoupleMixin
 from pretix.control.views.organizer import OrganizerDetailViewMixin
-from pretix.multidomain.urlreverse import eventreverse
+from pretix.helpers import OF_SELF
+from pretix.multidomain.urlreverse import build_absolute_uri, eventreverse
 from pretix.plugins.stripe.forms import OrganizerStripeSettingsForm
 from pretix.plugins.stripe.models import ReferencedStripeObject
 from pretix.plugins.stripe.payment import StripeCC, StripeSettingsHolder
@@ -76,17 +78,24 @@ logger = logging.getLogger('pretix.plugins.stripe')
 
 @xframe_options_exempt
 def redirect_view(request, *args, **kwargs):
-    signer = signing.Signer(salt='safe-redirect')
     try:
-        url = signer.unsign(request.GET.get('url', ''))
+        data = signing.loads(request.GET.get('data', ''), salt='safe-redirect')
     except signing.BadSignature:
         return HttpResponseBadRequest('Invalid parameter')
 
-    r = render(request, 'pretixplugins/stripe/redirect.html', {
-        'url': url,
-    })
-    r._csp_ignore = True
-    return r
+    if 'go' in request.GET:
+        if 'session' in data:
+            for k, v in data['session'].items():
+                request.session[k] = v
+        return redirect(data['url'])
+    else:
+        params = request.GET.copy()
+        params['go'] = '1'
+        r = render(request, 'pretixplugins/stripe/redirect.html', {
+            'url': build_absolute_uri(request.event, 'plugins:stripe:redirect') + '?' + urllib.parse.urlencode(params),
+        })
+        r._csp_ignore = True
+        return r
 
 
 @scopes_disabled()
@@ -157,9 +166,15 @@ def oauth_return(request, *args, **kwargs):
             event.settings.payment_stripe_connect_refresh_token = data['refresh_token']
             event.settings.payment_stripe_connect_user_id = data['stripe_user_id']
             event.settings.payment_stripe_merchant_country = account.get('country')
-            if account.get('business_name') or account.get('display_name') or account.get('email'):
+            if (
+                account.get('business_profile', {}).get('name')
+                or account.get('settings', {}).get('dashboard', {}).get('display_name')
+                or account.get('email')
+            ):
                 event.settings.payment_stripe_connect_user_name = (
-                    account.get('business_name') or account.get('display_name') or account.get('email')
+                    account.get('business_profile', {}).get('name')
+                    or account.get('settings', {}).get('dashboard', {}).get('display_name')
+                    or account.get('email')
                 )
 
             if data['livemode']:
@@ -283,13 +298,13 @@ def charge_webhook(event, event_json, charge_id, rso):
 
     with transaction.atomic():
         if payment:
-            payment = OrderPayment.objects.select_for_update().get(pk=payment.pk)
+            payment = OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=payment.pk)
         else:
             payment = order.payments.filter(
                 info__icontains=charge['id'],
                 provider__startswith='stripe',
                 amount=prov._amount_to_decimal(charge['amount']),
-            ).select_for_update().last()
+            ).select_for_update(of=OF_SELF).last()
         if not payment:
             payment = order.payments.create(
                 state=OrderPayment.PAYMENT_STATE_CREATED,
@@ -379,13 +394,13 @@ def source_webhook(event, event_json, source_id, rso):
             payment = None
 
         if payment:
-            payment = OrderPayment.objects.select_for_update().get(pk=payment.pk)
+            payment = OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=payment.pk)
         else:
             payment = order.payments.filter(
                 info__icontains=src['id'],
                 provider__startswith='stripe',
                 amount=prov._amount_to_decimal(src['amount']) if src['amount'] is not None else order.total,
-            ).select_for_update().last()
+            ).select_for_update(of=OF_SELF).last()
         if not payment:
             payment = order.payments.create(
                 state=OrderPayment.PAYMENT_STATE_CREATED,
@@ -432,6 +447,9 @@ def paymentintent_webhook(event, event_json, paymentintent_id, rso):
             reference=charge.id,
             defaults={'order': rso.payment.order, 'payment': rso.payment}
         )
+
+    if event_json["type"] == "payment_intent.payment_failed":
+        rso.payment.fail(info=event_json)
 
     return HttpResponse(status=200)
 
@@ -517,7 +535,7 @@ class ReturnView(StripeOrderView, View):
 
         with transaction.atomic():
             self.order.refresh_from_db()
-            self.payment = OrderPayment.objects.select_for_update().get(pk=self.payment.pk)
+            self.payment = OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=self.payment.pk)
             if self.payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
                 if 'payment_stripe_token' in request.session:
                     del request.session['payment_stripe_token']

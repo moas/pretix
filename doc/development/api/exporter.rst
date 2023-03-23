@@ -60,7 +60,13 @@ The exporter class
    .. py:attribute:: BaseExporter.event
 
       The default constructor sets this property to the event we are currently
-      working for.
+      working for. This will be ``None`` if the exporter is run for multiple
+      events.
+
+   .. py:attribute:: BaseExporter.events
+
+      The default constructor sets this property to the list of events to work
+      on, regardless of whether the exporter is called for one or multiple events.
 
    .. autoattribute:: identifier
 
@@ -69,6 +75,10 @@ The exporter class
    .. autoattribute:: verbose_name
 
       This is an abstract attribute, you **must** override this!
+
+   .. autoattribute:: description
+
+   .. autoattribute:: category
 
    .. autoattribute:: export_form_fields
 

@@ -46,6 +46,7 @@ from django.utils.crypto import get_random_string
 from django.utils.functional import cached_property
 from django.utils.timezone import get_current_timezone, make_aware, now
 from django.utils.translation import gettext_lazy as _
+from i18nfield.fields import I18nCharField
 
 from pretix.base.models.base import LoggedModel
 from pretix.base.validators import OrganizerSlugBanlistValidator
@@ -92,7 +93,7 @@ class Organizer(LoggedModel):
     class Meta:
         verbose_name = _("Organizer")
         verbose_name_plural = _("Organizers")
-        ordering = ("name",)
+        ordering = ("name", "slug")
 
     def __str__(self) -> str:
         return self.name
@@ -460,7 +461,31 @@ class TeamAPIToken(models.Model):
         :param request: Ignored, for compatibility with User model
         :return: Iterable of Events
         """
-        if getattr(self.team, permission, False):
+        if (
+                isinstance(permission, (list, tuple)) and any(getattr(self.team, p, False) for p in permission)
+        ) or (isinstance(permission, str) and getattr(self.team, permission, False)):
             return self.get_events_with_any_permission()
         else:
             return self.team.organizer.events.none()
+
+
+class OrganizerFooterLink(models.Model):
+    """
+    A footer link assigned to an organizer.
+    """
+    organizer = models.ForeignKey('Organizer', on_delete=models.CASCADE, related_name='footer_links')
+    label = I18nCharField(
+        max_length=200,
+        verbose_name=_("Link text"),
+    )
+    url = models.URLField(
+        verbose_name=_("Link URL"),
+    )
+
+    def delete(self, *args, **kwargs):
+        super().delete(*args, **kwargs)
+        self.organizer.cache.clear()
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        self.organizer.cache.clear()

@@ -1,4 +1,6 @@
-.. spelling:: checkin
+.. spelling:word-list:: checkin
+
+.. _rest-checkinlists:
 
 Check-in lists
 ==============
@@ -34,24 +36,12 @@ allow_multiple_entries                boolean                    If ``true``, su
 allow_entry_after_exit                boolean                    If ``true``, subsequent scans of a ticket on this list are valid if the last scan of the ticket was an exit scan.
 rules                                 object                     Custom check-in logic. The contents of this field are currently not considered a stable API and modifications through the API are highly discouraged.
 exit_all_at                           datetime                   Automatically check out (i.e. perform an exit scan) at this point in time. After this happened, this property will automatically be set exactly one day into the future. Note that this field is considered "internal configuration" and if you pull the list with ``If-Modified-Since``, the daily change in this field will not trigger a response.
+addon_match                           boolean                    If ``true``, tickets on this list can be redeemed by scanning their parent ticket if this still leads to an unambiguous match.
 ===================================== ========================== =======================================================
 
-.. versionchanged:: 3.9
+.. versionchanged:: 4.12
 
-    The ``subevent`` attribute may now be ``null`` inside event series. The ``allow_multiple_entries``,
-    ``allow_entry_after_exit``, and ``rules`` attributes have been added.
-
-.. versionchanged:: 3.11
-
-    The ``subevent_match`` and ``exclude`` query parameters have been added.
-
-.. versionchanged:: 3.12
-
-    The ``exit_all_at`` attribute has been added.
-
-.. versionchanged:: 3.17
-
-    The ``ends_after`` and ``expand`` query parameters have been added.
+    The ``addon_match`` attribute has been added.
 
 Endpoints
 ---------
@@ -94,6 +84,7 @@ Endpoints
             "allow_entry_after_exit": true,
             "exit_all_at": null,
             "rules": {},
+            "addon_match": false,
             "auto_checkin_sales_channels": [
               "pretixpos"
             ]
@@ -107,6 +98,8 @@ Endpoints
    :query string ends_after: Exclude all check-in lists attached to a sub-event that is already in the past at the given time.
    :query string expand: Expand a field into a full object. Currently only ``subevent`` is supported. Can be passed multiple times.
    :query string exclude: Exclude a field from the output, e.g. ``checkin_count``. Can be used as a performance optimization. Can be passed multiple times.
+   :query string ordering: Manually set the ordering of results. Valid fields to be used are ``id``, ``name``, and ``subevent__date_from``,
+                           Default: ``subevent__date_from,name``
    :param organizer: The ``slug`` field of the organizer to fetch
    :param event: The ``slug`` field of the event to fetch
    :statuscode 200: no error
@@ -146,6 +139,7 @@ Endpoints
         "allow_entry_after_exit": true,
         "exit_all_at": null,
         "rules": {},
+        "addon_match": false,
         "auto_checkin_sales_channels": [
           "pretixpos"
         ]
@@ -245,6 +239,7 @@ Endpoints
         "subevent": null,
         "allow_multiple_entries": false,
         "allow_entry_after_exit": true,
+        "addon_match": false,
         "auto_checkin_sales_channels": [
           "pretixpos"
         ]
@@ -269,6 +264,7 @@ Endpoints
         "subevent": null,
         "allow_multiple_entries": false,
         "allow_entry_after_exit": true,
+        "addon_match": false,
         "auto_checkin_sales_channels": [
           "pretixpos"
         ]
@@ -323,6 +319,7 @@ Endpoints
         "subevent": null,
         "allow_multiple_entries": false,
         "allow_entry_after_exit": true,
+        "addon_match": false,
         "auto_checkin_sales_channels": [
           "pretixpos"
         ]
@@ -367,7 +364,7 @@ Endpoints
    Stores a failed check-in. Only necessary for statistical purposes if you perform scan validation offline.
 
    :<json boolean error_reason: One of ``canceled``, ``invalid``, ``unpaid``, ``product``, ``rules``, ``revoked``,
-                                ``incomplete``, ``already_redeemed``, or ``error``. Required.
+                                ``incomplete``, ``already_redeemed``, ``blocked``, ``invalid_time``, or ``error``. Required.
    :<json raw_barcode: The raw barcode you scanned. Required.
    :<json datetime: Date and time of the scan. Optional.
    :<json type: Type of scan, defaults to ``"entry"``.
@@ -414,6 +411,9 @@ Order position endpoints
 
    * If ``attendee_name`` is empty, it will automatically fall back to values from a parent product or from invoice
      addresses.
+
+   You can use this endpoint to implement a ticket search. We also provide a dedicated search input as part of our
+   :ref:`check-in API <rest-checkin>` that supports search across multiple events.
 
    **Example request**:
 
@@ -604,15 +604,23 @@ Order position endpoints
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
    :statuscode 404: The requested order position or check-in list does not exist.
 
-.. _`rest-checkin-redeem`:
-
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/checkinlists/(list)/positions/(id)/redeem/
 
    Tries to redeem an order position, identified by its internal ID, i.e. checks the attendee in. This endpoint
    accepts a number of optional requests in the body.
 
-   **Tip:** Instead of an ID, you can also use the ``secret`` field as the lookup parameter.
+   **Tip:** Instead of an ID, you can also use the ``secret`` field as the lookup parameter. In this case, you should
+   always set ``untrusted_input=true`` as a query parameter to avoid security issues.
 
+   .. note::
+
+      We no longer recommend using this API if you're building a ticket scanning application, as it has a few design
+      flaws that can lead to `security issues`_ or compatibility issues due to barcode content characters that are not
+      URL-safe. We recommend to use our new :ref:`check-in API <rest-checkin>` instead.
+
+   :query boolean untrusted_input: If set to true, the lookup parameter is **always** interpreted as a ``secret``, never
+                                   as an ``id``. This should be always set if you are passing through untrusted, scanned
+                                   data to avoid guessing of ticket IDs.
    :<json boolean questions_supported: When this parameter is set to ``true``, handling of questions is supported. If
                                        you do not implement question handling in your user interface, you **must**
                                        set this to ``false``. In that case, questions will just be ignored. Defaults
@@ -733,12 +741,17 @@ Order position endpoints
 
    Possible error reasons:
 
-   * ``unpaid`` - Ticket is not paid for
-   * ``canceled`` – Ticket is canceled or expired. This reason is only sent when your request sets
+   * ``invalid`` - Ticket code not known.
+   * ``unpaid`` - Ticket is not paid for.
+   * ``blocked`` - Ticket has been blocked.
+   * ``invalid_time`` - Ticket is not valid at this time.
+   * ``canceled`` – Ticket is canceled or expired. This reason is only sent when your request sets.
      ``canceled_supported`` to ``true``, otherwise these orders return ``unpaid``.
-   * ``already_redeemed`` - Ticket already has been redeemed
-   * ``product`` - Tickets with this product may not be scanned at this device
-   * ``rules`` - Check-in prevented by a user-defined rule
+   * ``already_redeemed`` - Ticket already has been redeemed.
+   * ``product`` - Tickets with this product may not be scanned at this device.
+   * ``rules`` - Check-in prevented by a user-defined rule.
+   * ``ambiguous`` - Multiple tickets match scan, rejected.
+   * ``revoked`` - Ticket code has been revoked.
 
    In case of reason ``rules``, there might be an additional response field ``reason_explanation`` with a human-readable
    description of the violated rules. However, that field can also be missing or be ``null``.
@@ -752,3 +765,6 @@ Order position endpoints
    :statuscode 401: Authentication failure
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
    :statuscode 404: The requested order position or check-in list does not exist.
+
+
+.. _security issues: https://pretix.eu/about/de/blog/20220705-release-4111/

@@ -62,7 +62,8 @@ from django.urls import reverse
 from django.utils import formats
 from django.utils.formats import date_format, get_format
 from django.utils.functional import cached_property
-from django.utils.http import is_safe_url
+from django.utils.html import conditional_escape
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.timezone import make_aware, now
 from django.utils.translation import gettext, gettext_lazy as _, ngettext
 from django.views.generic import (
@@ -77,7 +78,7 @@ from pretix.base.i18n import language
 from pretix.base.models import (
     CachedCombinedTicket, CachedFile, CachedTicket, Checkin, Invoice,
     InvoiceAddress, Item, ItemVariation, LogEntry, Order, QuestionAnswer,
-    Quota, generate_secret,
+    Quota, ScheduledEventExport, generate_secret,
 )
 from pretix.base.models.orders import (
     CancellationRequest, OrderFee, OrderPayment, OrderPosition, OrderRefund,
@@ -87,15 +88,13 @@ from pretix.base.payment import PaymentException
 from pretix.base.secrets import assign_ticket_secret
 from pretix.base.services import tickets
 from pretix.base.services.cancelevent import cancel_event
-from pretix.base.services.export import export
+from pretix.base.services.export import export, scheduled_event_export
 from pretix.base.services.invoices import (
     generate_cancellation, generate_invoice, invoice_pdf, invoice_pdf_task,
     invoice_qualified, regenerate_invoice,
 )
 from pretix.base.services.locking import LockTimeoutException
-from pretix.base.services.mail import (
-    SendMailException, TolerantDict, render_mail,
-)
+from pretix.base.services.mail import SendMailException, render_mail
 from pretix.base.services.orders import (
     OrderChangeManager, OrderError, approve_order, cancel_order, deny_order,
     extend_order, mark_order_expired, mark_order_refunded,
@@ -113,6 +112,7 @@ from pretix.base.templatetags.money import money_filter
 from pretix.base.templatetags.rich_text import markdown_compile_email
 from pretix.base.views.mixins import OrderQuestionsViewMixin
 from pretix.base.views.tasks import AsyncAction
+from pretix.control.forms.exports import ScheduledEventExportForm
 from pretix.control.forms.filter import (
     EventOrderExpertFilterForm, EventOrderFilterForm, OverviewFilterForm,
     RefundFilterForm,
@@ -124,9 +124,12 @@ from pretix.control.forms.orders import (
     OrderPositionAddFormset, OrderPositionChangeForm, OrderPositionMailForm,
     OrderRefundForm, OtherOperationsForm, ReactivateOrderForm,
 )
+from pretix.control.forms.rrule import RRuleForm
 from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.control.signals import order_search_forms
 from pretix.control.views import PaginationMixin
+from pretix.helpers.compat import CompatDeleteView
+from pretix.helpers.format import format_map
 from pretix.helpers.safedownload import check_token
 from pretix.presale.signals import question_form_fields
 
@@ -293,6 +296,7 @@ class OrderDetail(OrderView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['items'] = self.get_items()
+        ctx['has_cancellation_fee'] = any(f.fee_type == OrderFee.FEE_TYPE_CANCELLATION for f in ctx['items']['fees'])
         ctx['event'] = self.request.event
         ctx['payments'] = self.order.payments.order_by('-created')
         ctx['refunds'] = self.order.refunds.select_related('payment').order_by('-created')
@@ -383,8 +387,8 @@ class OrderDetail(OrderView):
 
             p.has_questions = (
                 p.additional_fields or
-                (p.item.admission and self.request.event.settings.attendee_names_asked) or
-                (p.item.admission and self.request.event.settings.attendee_emails_asked) or
+                (p.item.ask_attendee_data and self.request.event.settings.attendee_names_asked) or
+                (p.item.ask_attendee_data and self.request.event.settings.attendee_emails_asked) or
                 p.item.questions.all()
             )
             p.cache_answers()
@@ -540,10 +544,8 @@ class OrderComment(OrderView):
                 self.order.log_action('pretix.event.order.checkin_attention', user=self.request.user, data={
                     'new_value': form.cleaned_data.get('checkin_attention')
                 })
-            print(self.order.custom_followup_at)
             self.order.save(update_fields=['checkin_attention', 'comment', 'custom_followup_at'])
             self.order.refresh_from_db()
-            print(self.order.custom_followup_at)
             messages.success(self.request, _('The comment has been updated.'))
         else:
             messages.error(self.request, _('Could not update the comment.'))
@@ -682,7 +684,7 @@ class OrderRefundCancel(OrderView):
             messages.success(self.request, _('The refund has been canceled.'))
         else:
             messages.error(self.request, _('This refund can not be canceled at the moment.'))
-        if "next" in self.request.GET and is_safe_url(self.request.GET.get("next"), allowed_hosts=None):
+        if "next" in self.request.GET and url_has_allowed_host_and_scheme(self.request.GET.get("next"), allowed_hosts=None):
             return redirect(self.request.GET.get("next"))
         return redirect(self.get_order_url())
 
@@ -718,7 +720,7 @@ class OrderRefundProcess(OrderView):
             messages.success(self.request, _('The refund has been processed.'))
         else:
             messages.error(self.request, _('This refund can not be processed at the moment.'))
-        if "next" in self.request.GET and is_safe_url(self.request.GET.get("next"), allowed_hosts=None):
+        if "next" in self.request.GET and url_has_allowed_host_and_scheme(self.request.GET.get("next"), allowed_hosts=None):
             return redirect(self.request.GET.get("next"))
         return redirect(self.get_order_url())
 
@@ -744,7 +746,7 @@ class OrderRefundDone(OrderView):
             messages.success(self.request, _('The refund has been marked as done.'))
         else:
             messages.error(self.request, _('This refund can not be processed at the moment.'))
-        if "next" in self.request.GET and is_safe_url(self.request.GET.get("next"), allowed_hosts=None):
+        if "next" in self.request.GET and url_has_allowed_host_and_scheme(self.request.GET.get("next"), allowed_hosts=None):
             return redirect(self.request.GET.get("next"))
         return redirect(self.get_order_url())
 
@@ -1070,6 +1072,12 @@ class OrderRefundView(OrderView):
                     else:
                         any_success = True
 
+                        if r.state == OrderRefund.REFUND_STATE_DONE:
+                            self.order.log_action('pretix.event.order.refund.done', {
+                                'local_id': r.local_id,
+                                'provider': r.provider,
+                            }, user=self.request.user)
+
                 if any_success:
                     if self.start_form.cleaned_data.get('action') == 'mark_refunded':
                         if self.order.cancel_allowed():
@@ -1119,7 +1127,7 @@ class OrderRefundView(OrderView):
 
         for p in payments:
             if p.payment_provider:
-                p.html_info = (p.payment_provider.payment_control_render_short(p) or "").strip()
+                p.html_info = conditional_escape(p.payment_provider.payment_control_render_short(p) or "").strip()
 
         return render(self.request, 'pretixcontrol/order/refund_choose.html', {
             'payments': payments,
@@ -1180,7 +1188,7 @@ class OrderTransition(OrderView):
             }
         )
 
-    def post(self, *args, **kwargs):
+    def post(self, request, *args, **kwargs):
         to = self.request.POST.get('status', '')
         if self.order.status in (Order.STATUS_PENDING, Order.STATUS_EXPIRED) and to == 'p' and self.mark_paid_form.is_valid():
             ps = self.mark_paid_form.cleaned_data['amount']
@@ -1188,13 +1196,17 @@ class OrderTransition(OrderView):
             if ps == Decimal('0.00') and self.order.pending_sum <= Decimal('0.00'):
                 p = self.order.payments.filter(state=OrderPayment.PAYMENT_STATE_CONFIRMED).last()
                 if p:
-                    p._mark_order_paid(
-                        user=self.request.user,
-                        send_mail=self.mark_paid_form.cleaned_data['send_email'],
-                        force=self.mark_paid_form.cleaned_data.get('force', False),
-                        payment_refund_sum=self.order.payment_refund_sum,
-                    )
-                    messages.success(self.request, _('The order has been marked as paid.'))
+                    try:
+                        p._mark_order_paid(
+                            user=self.request.user,
+                            send_mail=self.mark_paid_form.cleaned_data['send_email'],
+                            force=self.mark_paid_form.cleaned_data.get('force', False),
+                            payment_refund_sum=self.order.payment_refund_sum,
+                        )
+                    except Quota.QuotaExceededException as e:
+                        messages.error(self.request, str(e))
+                    else:
+                        messages.success(self.request, _('The order has been marked as paid.'))
                     return redirect(self.get_order_url())
 
             try:
@@ -1208,7 +1220,8 @@ class OrderTransition(OrderView):
                                                                OrderPayment.PAYMENT_STATE_CREATED)):
                     try:
                         with transaction.atomic():
-                            p.payment_provider.cancel_payment(p)
+                            if p.payment_provider:
+                                p.payment_provider.cancel_payment(p)
                             self.order.log_action('pretix.event.order.payment.canceled', {
                                 'local_id': p.local_id,
                                 'provider': p.provider,
@@ -1264,38 +1277,41 @@ class OrderTransition(OrderView):
                                                  'confirmation mail.'))
             else:
                 messages.success(self.request, _('The payment has been created successfully.'))
-        elif self.order.cancel_allowed() and to == 'c' and self.mark_canceled_form.is_valid():
-            try:
-                cancel_order(self.order.pk, user=self.request.user,
-                             email_comment=self.mark_canceled_form.cleaned_data['comment'],
-                             send_mail=self.mark_canceled_form.cleaned_data['send_email'],
-                             cancel_invoice=self.mark_canceled_form.cleaned_data.get('cancel_invoice', True),
-                             cancellation_fee=self.mark_canceled_form.cleaned_data.get('cancellation_fee'))
-            except OrderError as e:
-                messages.error(self.request, str(e))
-            else:
-                self.order.refresh_from_db()
-                if self.order.pending_sum < 0:
-                    messages.success(self.request, _('The order has been canceled. You can now select how you want to '
-                                                     'transfer the money back to the user.'))
-                    with language(self.order.locale):
-                        return redirect(reverse('control:event.order.refunds.start', kwargs={
-                            'event': self.request.event.slug,
-                            'organizer': self.request.event.organizer.slug,
-                            'code': self.order.code
-                        }) + '?start-action=do_nothing&start-mode=partial&start-partial_amount={}&giftcard={}&comment={}'.format(
-                            round_decimal(self.order.pending_sum * -1),
-                            'true' if self.req and self.req.refund_as_giftcard else 'false',
-                            quote(gettext('Order canceled'))
-                        ))
+        elif self.order.cancel_allowed() and to == 'c':
+            if self.mark_canceled_form.is_valid():
+                try:
+                    cancel_order(self.order.pk, user=self.request.user,
+                                 email_comment=self.mark_canceled_form.cleaned_data['comment'],
+                                 send_mail=self.mark_canceled_form.cleaned_data['send_email'],
+                                 cancel_invoice=self.mark_canceled_form.cleaned_data.get('cancel_invoice', True),
+                                 cancellation_fee=self.mark_canceled_form.cleaned_data.get('cancellation_fee'))
+                except OrderError as e:
+                    messages.error(self.request, str(e))
+                else:
+                    self.order.refresh_from_db()
+                    if self.order.pending_sum < 0:
+                        messages.success(self.request, _('The order has been canceled. You can now select how you want to '
+                                                         'transfer the money back to the user.'))
+                        with language(self.order.locale):
+                            return redirect(reverse('control:event.order.refunds.start', kwargs={
+                                'event': self.request.event.slug,
+                                'organizer': self.request.event.organizer.slug,
+                                'code': self.order.code
+                            }) + '?start-action=do_nothing&start-mode=partial&start-partial_amount={}&giftcard={}&comment={}'.format(
+                                round_decimal(self.order.pending_sum * -1),
+                                'true' if self.req and self.req.refund_as_giftcard else 'false',
+                                quote(gettext('Order canceled'))
+                            ))
 
-                messages.success(self.request, _('The order has been canceled.'))
+                    messages.success(self.request, _('The order has been canceled.'))
+            else:
+                return self.get(self.request, *args, **kwargs)
         elif self.order.status == Order.STATUS_PENDING and to == 'e':
             mark_order_expired(self.order, user=self.request.user)
             messages.success(self.request, _('The order has been marked as expired.'))
         return redirect(self.get_order_url())
 
-    def get(self, *args, **kwargs):
+    def get(self, request, *args, **kwargs):
         to = self.request.GET.get('status', '')
         if self.order.status in (Order.STATUS_PENDING, Order.STATUS_EXPIRED) and to == 'p':
             return render(self.request, 'pretixcontrol/order/pay.html', {
@@ -1511,6 +1527,7 @@ class OrderExtend(OrderView):
                     self.order,
                     new_date=self.form.cleaned_data.get('expires'),
                     force=self.form.cleaned_data.get('quota_ignore', False),
+                    valid_if_pending=self.form.cleaned_data.get('valid_if_pending', False),
                     user=self.request.user
                 )
                 messages.success(self.request, _('The payment term has been changed.'))
@@ -1650,6 +1667,7 @@ class OrderChange(OrderView):
         ctx['fees'] = self.fees
         ctx['add_formset'] = self.add_formset
         ctx['other_form'] = self.other_form
+        ctx['use_revocation_list'] = self.request.event.ticket_secret_generator.use_revocation_list
         return ctx
 
     def _process_other(self, ocm):
@@ -1763,6 +1781,17 @@ class OrderChange(OrderView):
 
                 if p.form.cleaned_data['tax_rule'] and p.form.cleaned_data['tax_rule'] != p.tax_rule:
                     ocm.change_tax_rule(p, p.form.cleaned_data['tax_rule'])
+
+                if p.form.cleaned_data["blocked"] and "admin" not in (p.blocked or []):
+                    ocm.add_block(p, "admin")
+                elif not p.form.cleaned_data["blocked"] and "admin" in (p.blocked or []):
+                    ocm.remove_block(p, "admin")
+
+                if p.form.cleaned_data['valid_from'] != p.valid_from:
+                    ocm.change_valid_from(p, p.form.cleaned_data['valid_from'])
+
+                if p.form.cleaned_data['valid_until'] != p.valid_until:
+                    ocm.change_valid_until(p, p.form.cleaned_data['valid_until'])
 
                 if p.form.cleaned_data.get('operation_split'):
                     ocm.split(p)
@@ -2025,7 +2054,7 @@ class OrderSendMail(EventPermissionRequiredMixin, OrderViewMixin, FormView):
         with language(order.locale, self.request.event.settings.region):
             email_context = get_email_context(event=order.event, order=order)
         email_template = LazyI18nString(form.cleaned_data['message'])
-        email_subject = str(form.cleaned_data['subject']).format_map(TolerantDict(email_context))
+        email_subject = format_map(str(form.cleaned_data['subject']), email_context)
         email_content = render_mail(email_template, email_context)
         if self.request.POST.get('action') == 'preview':
             self.preview_output = {
@@ -2090,7 +2119,7 @@ class OrderPositionSendMail(OrderSendMail):
         with language(position.order.locale, self.request.event.settings.region):
             email_context = get_email_context(event=position.order.event, order=position.order, position=position)
         email_template = LazyI18nString(form.cleaned_data['message'])
-        email_subject = str(form.cleaned_data['subject']).format_map(TolerantDict(email_context))
+        email_subject = format_map(str(form.cleaned_data['subject']), email_context)
         email_content = render_mail(email_template, email_context)
         if self.request.POST.get('action') == 'preview':
             self.preview_output = {
@@ -2231,20 +2260,40 @@ class OrderGo(EventPermissionRequiredMixin, View):
 class ExportMixin:
     @cached_property
     def exporters(self):
-        exporters = []
         responses = register_data_exporters.send(self.request.event)
-        id = self.request.GET.get("identifier") or self.request.POST.get("exporter")
-        for ex in sorted([response(self.request.event, self.request.organizer) for r, response in responses if response], key=lambda ex: str(ex.verbose_name)):
-            if id and ex.identifier != id:
+        return sorted(
+            [response(self.request.event, self.request.organizer) for r, response in responses if response],
+            key=lambda ex: (0 if ex.category else 1, ex.category or "", 0 if ex.featured else 1, str(ex.verbose_name).lower())
+        )
+
+    @cached_property
+    def exporter(self):
+        id = self.request.GET.get("identifier") or self.request.POST.get("exporter") or self.request.GET.get("exporter")
+        if not id:
+            return None
+        for ex in self.exporters:
+            if id != ex.identifier:
                 continue
 
-            # Use form parse cycle to generate useful defaults
-            test_form = ExporterForm(data=self.request.GET, prefix=ex.identifier)
-            test_form.fields = ex.export_form_fields
-            test_form.is_valid()
-            initial = {
-                k: v for k, v in test_form.cleaned_data.items() if ex.identifier + "-" + k in self.request.GET
-            }
+            if self.scheduled:
+                initial = dict(self.scheduled.export_form_data)
+
+                test_form = ExporterForm(data=self.request.GET, prefix=ex.identifier)
+                test_form.fields = ex.export_form_fields
+                for k in initial:
+                    if initial[k] and k in test_form.fields:
+                        try:
+                            initial[k] = test_form.fields[k].to_python(initial[k])
+                        except Exception:
+                            pass
+            else:
+                # Use form parse cycle to generate useful defaults
+                test_form = ExporterForm(data=self.request.GET, prefix=ex.identifier)
+                test_form.fields = ex.export_form_fields
+                test_form.is_valid()
+                initial = {
+                    k: v for k, v in test_form.cleaned_data.items() if ex.identifier + "-" + k in self.request.GET
+                }
 
             ex.form = ExporterForm(
                 data=(self.request.POST if self.request.method == 'POST' else None),
@@ -2252,12 +2301,27 @@ class ExportMixin:
                 initial=initial
             )
             ex.form.fields = ex.export_form_fields
-            exporters.append(ex)
-        return exporters
+            return ex
+
+    def get_scheduled_queryset(self):
+        if not self.request.user.has_event_permission(self.request.organizer, self.request.event, 'can_change_event_settings',
+                                                      request=self.request):
+            qs = self.request.event.scheduled_exports.filter(owner=self.request.user)
+        else:
+            qs = self.request.event.scheduled_exports
+        return qs.select_related('owner').order_by('export_identifier', 'schedule_next_run')
+
+    @cached_property
+    def scheduled(self):
+        if "scheduled" in self.request.POST:
+            return get_object_or_404(self.get_scheduled_queryset(), pk=self.request.POST.get("scheduled"))
+        elif "scheduled" in self.request.GET:
+            return get_object_or_404(self.get_scheduled_queryset(), pk=self.request.GET.get("scheduled"))
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['exporters'] = self.exporters
+        ctx['exporter'] = self.exporter
         return ctx
 
 
@@ -2265,7 +2329,7 @@ class ExportDoView(EventPermissionRequiredMixin, ExportMixin, AsyncAction, Templ
     permission = 'can_view_orders'
     known_errortypes = ['ExportError']
     task = export
-    template_name = 'pretixcontrol/orders/export.html'
+    template_name = 'pretixcontrol/orders/export_form.html'
 
     def get_success_message(self, value):
         return None
@@ -2282,16 +2346,6 @@ class ExportDoView(EventPermissionRequiredMixin, ExportMixin, AsyncAction, Templ
     def get_check_url(self, task_id, ajax):
         return self.request.path + '?async_id=%s&exporter=%s' % (task_id, self.exporter.identifier) + ('&ajax=1' if ajax else '')
 
-    @cached_property
-    def exporter(self):
-        if self.request.method == "POST":
-            identifier = self.request.POST.get("exporter")
-        else:
-            identifier = self.request.GET.get("exporter")
-        for ex in self.exporters:
-            if ex.identifier == identifier:
-                return ex
-
     def get(self, request, *args, **kwargs):
         if 'async_id' in request.GET and settings.HAS_CELERY:
             return self.get_result(request)
@@ -2305,20 +2359,165 @@ class ExportDoView(EventPermissionRequiredMixin, ExportMixin, AsyncAction, Templ
                 'organizer': self.request.event.organizer.slug
             }))
 
-        if not self.exporter.form.is_valid():
-            messages.error(self.request, _('There was a problem processing your input. See below for error details.'))
-            return self.get(request, *args, **kwargs)
+        if self.scheduled:
+            data = self.scheduled.export_form_data
+        else:
+            if not self.exporter.form.is_valid():
+                messages.error(self.request, _('There was a problem processing your input. See below for error details.'))
+                return self.get(request, *args, **kwargs)
+            data = self.exporter.form.cleaned_data
 
         cf = CachedFile(web_download=True, session_key=request.session.session_key)
         cf.date = now()
         cf.expires = now() + timedelta(hours=24)
         cf.save()
-        return self.do(self.request.event.id, str(cf.id), self.exporter.identifier, self.exporter.form.cleaned_data)
+        return self.do(self.request.event.id, str(cf.id), self.exporter.identifier, data)
 
 
-class ExportView(EventPermissionRequiredMixin, ExportMixin, TemplateView):
+class ExportView(EventPermissionRequiredMixin, ExportMixin, ListView):
     permission = 'can_view_orders'
-    template_name = 'pretixcontrol/orders/export.html'
+    paginate_by = 25
+    context_object_name = 'scheduled'
+
+    def get_template_names(self):
+        if self.exporter:
+            return ['pretixcontrol/orders/export_form.html']
+        return ['pretixcontrol/orders/export.html']
+
+    @transaction.atomic()
+    def post(self, request, *args, **kwargs):
+        if request.POST.get("schedule") == "save":
+            if self.exporter.form.is_valid() and self.rrule_form.is_valid() and self.schedule_form.is_valid():
+                self.schedule_form.instance.export_identifier = self.exporter.identifier
+                self.schedule_form.instance.export_form_data = self.exporter.form.cleaned_data
+                self.schedule_form.instance.schedule_rrule = str(self.rrule_form.to_rrule())
+                self.schedule_form.instance.error_counter = 0
+                self.schedule_form.instance.error_last_message = None
+                self.schedule_form.instance.compute_next_run()
+                self.schedule_form.instance.save()
+                if self.schedule_form.instance.schedule_next_run:
+                    messages.success(
+                        request,
+                        _('Your export schedule has been saved. The next export will start around {datetime}.').format(
+                            datetime=date_format(self.schedule_form.instance.schedule_next_run, 'SHORT_DATETIME_FORMAT')
+                        )
+                    )
+                else:
+                    messages.warning(request, _('Your export schedule has been saved, but no next export is planned.'))
+                self.request.event.log_action(
+                    'pretix.event.export.schedule.changed' if self.scheduled else 'pretix.event.export.schedule.added',
+                    user=self.request.user, data={
+                        'id': self.schedule_form.instance.id,
+                        'export_identifier': self.exporter.identifier,
+                        'export_form_data': self.exporter.form.cleaned_data,
+                        'schedule_rrule': self.schedule_form.instance.schedule_rrule,
+                        **self.schedule_form.cleaned_data,
+                    }
+                )
+                return redirect(reverse('control:event.orders.export', kwargs={
+                    'event': self.request.event.slug,
+                    'organizer': self.request.event.organizer.slug
+                }))
+            else:
+                return super().get(request, *args, **kwargs)
+        return super().get(request, *args, **kwargs)
+
+    @cached_property
+    def rrule_form(self):
+        if self.scheduled:
+            initial = RRuleForm.initial_from_rrule(self.scheduled.schedule_rrule)
+        else:
+            initial = {}
+        return RRuleForm(
+            data=self.request.POST if self.request.method == 'POST' and self.request.POST.get("schedule") == "save" else None,
+            prefix="rrule",
+            initial=initial
+        )
+
+    @cached_property
+    def schedule_form(self):
+        instance = self.scheduled or ScheduledEventExport(
+            event=self.request.event,
+            owner=self.request.user,
+        )
+        if not self.scheduled:
+            initial = {
+                "mail_subject": gettext("Export: {title}").format(title=self.exporter.verbose_name),
+                "mail_template": gettext("Hello,\n\nattached to this email, you can find a new scheduled report for {name}.").format(
+                    name=str(self.request.event.name)
+                ),
+                "schedule_rrule_time": time(4, 0, 0),
+            }
+        else:
+            initial = {}
+        return ScheduledEventExportForm(
+            data=self.request.POST if self.request.method == 'POST' and self.request.POST.get("schedule") == "save" else None,
+            prefix="schedule",
+            instance=instance,
+            initial=initial,
+        )
+
+    def get_queryset(self):
+        return self.get_scheduled_queryset()
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        if "schedule" in self.request.POST or self.scheduled:
+            ctx['schedule_form'] = self.schedule_form
+            ctx['rrule_form'] = self.rrule_form
+        elif not self.exporter:
+            for s in ctx['scheduled']:
+                try:
+                    s.export_verbose_name = [e for e in self.exporters if e.identifier == s.export_identifier][0].verbose_name
+                except IndexError:
+                    s.export_verbose_name = "?"
+        return ctx
+
+
+class DeleteScheduledExportView(EventPermissionRequiredMixin, ExportMixin, CompatDeleteView):
+    permission = 'can_view_orders'
+    template_name = 'pretixcontrol/orders/export_delete.html'
+    context_object_name = 'export'
+
+    def get_queryset(self):
+        return self.get_scheduled_queryset()
+
+    def get_success_url(self):
+        return reverse('control:event.orders.export', kwargs={
+            'event': self.request.event.slug,
+            'organizer': self.request.event.organizer.slug
+        })
+
+    @transaction.atomic()
+    def delete(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        self.object.delete()
+        self.request.event.log_action('pretix.event.export.schedule.deleted', user=self.request.user, data={
+            'id': self.object.id,
+        })
+        return redirect(self.get_success_url())
+
+
+class RunScheduledExportView(EventPermissionRequiredMixin, ExportMixin, View):
+
+    def post(self, request, *args, **kwargs):
+        s = get_object_or_404(self.get_scheduled_queryset(), pk=kwargs.get('pk'))
+        scheduled_event_export.apply_async(
+            kwargs={
+                'event': s.event_id,
+                'schedule': s.pk,
+            },
+            # Scheduled exports usually run on the low-prio queue "background" but if they're manually triggered,
+            # we run them with normal priority
+            queue='default',
+        )
+        messages.success(self.request, _('Your export is queued to start soon. The results will be send via email. '
+                                         'Depending on system load and type and size of export, this may take a few '
+                                         'minutes.'))
+        return redirect(reverse('control:event.orders.export', kwargs={
+            'event': self.request.event.slug,
+            'organizer': self.request.event.organizer.slug
+        }))
 
 
 class RefundList(EventPermissionRequiredMixin, PaginationMixin, ListView):
@@ -2330,7 +2529,7 @@ class RefundList(EventPermissionRequiredMixin, PaginationMixin, ListView):
     def get_queryset(self):
         qs = OrderRefund.objects.filter(
             order__event=self.request.event
-        ).select_related('order')
+        ).select_related('order').order_by('-created', '-pk')
 
         if self.filter_form.is_valid():
             qs = self.filter_form.filter_qs(qs)

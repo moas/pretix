@@ -43,6 +43,7 @@ from django.core.files.base import ContentFile
 from django_countries.fields import Country
 from django_scopes import scopes_disabled
 from pytz import UTC
+from tests.const import SAMPLE_PNG
 
 from pretix.base.channels import get_all_sales_channels
 from pretix.base.models import (
@@ -262,6 +263,7 @@ TEST_ITEM_RES = {
     "tax_rate": "0.00",
     "tax_rule": None,
     "admission": False,
+    "personalized": False,
     "issue_giftcard": False,
     "position": 0,
     "generate_tickets": None,
@@ -294,6 +296,15 @@ TEST_ITEM_RES = {
     "grant_membership_duration_like_event": True,
     "grant_membership_duration_days": 0,
     "grant_membership_duration_months": 0,
+    "validity_mode": None,
+    "validity_fixed_from": None,
+    "validity_fixed_until": None,
+    "validity_dynamic_duration_minutes": None,
+    "validity_dynamic_duration_hours": None,
+    "validity_dynamic_duration_days": None,
+    "validity_dynamic_duration_months": None,
+    "validity_dynamic_start_choice": False,
+    "validity_dynamic_start_choice_day_limit": None,
 }
 
 
@@ -376,6 +387,7 @@ def test_item_detail_variations(token_client, organizer, event, team, item):
         "active": True,
         "description": None,
         "position": 0,
+        "checkin_attention": False,
         "require_approval": False,
         "require_membership": False,
         "require_membership_hidden": False,
@@ -384,7 +396,8 @@ def test_item_detail_variations(token_client, organizer, event, team, item):
         "available_from": None,
         "available_until": None,
         "hide_without_voucher": False,
-        "original_price": None
+        "original_price": None,
+        "meta_data": {}
     }]
     res["has_variations"] = True
     resp = token_client.get('/api/v1/organizers/{}/events/{}/items/{}/'.format(organizer.slug, event.slug,
@@ -471,9 +484,45 @@ def test_item_create(token_client, organizer, event, item, category, taxrule, me
     )
     assert resp.status_code == 201
     with scopes_disabled():
-        assert Item.objects.get(pk=resp.data['id']).sales_channels == ["web", "pretixpos"]
-        assert Item.objects.get(pk=resp.data['id']).meta_data == {'day': 'Wednesday'}
-        assert Item.objects.get(pk=resp.data['id']).require_membership_types.count() == 1
+        i = Item.objects.get(pk=resp.data['id'])
+        assert i.sales_channels == ["web", "pretixpos"]
+        assert i.meta_data == {'day': 'Wednesday'}
+        assert i.require_membership_types.count() == 1
+        assert i.personalized is True  # auto-set for backwards-compatibility
+        assert i.admission is True
+
+
+@pytest.mark.django_db
+def test_item_create_price_required(token_client, organizer, event, item, category, taxrule):
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/items/'.format(organizer.slug, event.slug),
+        {
+            "category": category.pk,
+            "name": {
+                "en": "Ticket"
+            },
+            "active": True,
+            "description": None,
+        },
+        format='json'
+    )
+    assert resp.status_code == 400
+    assert resp.data == {"default_price": ["This field is required."]}
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/items/'.format(organizer.slug, event.slug),
+        {
+            "category": category.pk,
+            "name": {
+                "en": "Ticket"
+            },
+            "active": True,
+            "description": None,
+            "default_price": None,
+        },
+        format='json'
+    )
+    assert resp.status_code == 400
+    assert resp.data == {"default_price": ["This field may not be null."]}
 
 
 @pytest.mark.django_db
@@ -512,13 +561,17 @@ def test_item_create_with_variation(token_client, organizer, event, item, catego
                     },
                     "active": True,
                     "require_approval": True,
+                    "checkin_attention": False,
                     "require_membership": False,
                     "require_membership_hidden": False,
                     "require_membership_types": [],
                     "description": None,
                     "position": 0,
                     "default_price": None,
-                    "price": "23.00"
+                    "price": "23.00",
+                    "meta_data": {
+                        "day": "Wednesday",
+                    },
                 }
             ]
         },
@@ -531,6 +584,7 @@ def test_item_create_with_variation(token_client, organizer, event, item, catego
         assert new_item.variations.first().value.localize('en') == "Comment"
         assert new_item.variations.first().require_approval is True
         assert set(new_item.variations.first().sales_channels) == set(get_all_sales_channels().keys())
+        assert new_item.variations.first().meta_data == {"day": "Wednesday"}
 
 
 @pytest.mark.django_db
@@ -918,7 +972,7 @@ def test_item_create_with_bundle(token_client, organizer, event, item, category,
     assert resp.content.decode() == '{"bundles":["The chosen variation does not belong to this item."]}'
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_item_update(token_client, organizer, event, item, category, item2, category2, taxrule2):
     resp = token_client.patch(
         '/api/v1/organizers/{}/events/{}/items/{}/'.format(organizer.slug, event.slug, item.pk),
@@ -1014,6 +1068,10 @@ def test_item_update(token_client, organizer, event, item, category, item2, cate
     assert resp.content.decode() == '{"non_field_errors":["Updating add-ons, bundles, or variations via PATCH/PUT is not supported. Please use ' \
                                     'the dedicated nested endpoint."]}'
 
+    item.personalized = True
+    item.admission = True
+    item.save()
+
     resp = token_client.patch(
         '/api/v1/organizers/{}/events/{}/items/{}/'.format(organizer.slug, event.slug, item.pk),
         {
@@ -1027,6 +1085,10 @@ def test_item_update(token_client, organizer, event, item, category, item2, cate
     with scopes_disabled():
         assert Item.objects.get(pk=item.pk).meta_data == {'day': 'Friday'}
 
+    item.refresh_from_db()
+    assert item.admission
+    assert item.personalized
+
     resp = token_client.patch(
         '/api/v1/organizers/{}/events/{}/items/{}/'.format(organizer.slug, event.slug, item.pk),
         {
@@ -1039,6 +1101,29 @@ def test_item_update(token_client, organizer, event, item, category, item2, cate
     assert resp.status_code == 400
     assert resp.content.decode() == '{"meta_data":["Item meta data property \'foo\' does not exist."]}'
 
+    resp = token_client.patch(
+        '/api/v1/organizers/{}/events/{}/items/{}/'.format(organizer.slug, event.slug, item.pk),
+        {
+            "admission": False,
+            "personalized": True,
+        },
+        format='json'
+    )
+    assert resp.status_code == 400
+    assert resp.content.decode() == '{"non_field_errors":["Only admission products can currently be personalized."]}'
+
+    resp = token_client.patch(
+        '/api/v1/organizers/{}/events/{}/items/{}/'.format(organizer.slug, event.slug, item.pk),
+        {
+            "admission": False
+        },
+        format='json'
+    )
+    assert resp.status_code == 200
+    item.refresh_from_db()
+    assert not item.admission
+    assert not item.personalized  # also set for backwards compatibility
+
 
 @pytest.mark.django_db
 def test_item_file_upload(token_client, organizer, event, item):
@@ -1046,7 +1131,7 @@ def test_item_file_upload(token_client, organizer, event, item):
         '/api/v1/upload',
         data={
             'media_type': 'image/png',
-            'file': ContentFile('file.png', 'invalid png content')
+            'file': ContentFile(SAMPLE_PNG)
         },
         format='upload',
         HTTP_CONTENT_DISPOSITION='attachment; filename="file.png"',
@@ -1070,7 +1155,7 @@ def test_item_file_upload(token_client, organizer, event, item):
         '/api/v1/upload',
         data={
             'media_type': 'image/png',
-            'file': ContentFile('file.png', 'invalid png content')
+            'file': ContentFile(SAMPLE_PNG)
         },
         format='upload',
         HTTP_CONTENT_DISPOSITION='attachment; filename="file.png"',
@@ -1217,6 +1302,7 @@ TEST_VARIATIONS_RES = {
     "position": 0,
     "default_price": None,
     "price": "23.00",
+    "checkin_attention": False,
     "require_approval": False,
     "require_membership": False,
     "require_membership_hidden": False,
@@ -1225,7 +1311,8 @@ TEST_VARIATIONS_RES = {
     "available_from": None,
     "available_until": None,
     "hide_without_voucher": False,
-    "original_price": None
+    "original_price": None,
+    "meta_data": {}
 }
 
 TEST_VARIATIONS_UPDATE = {
@@ -1236,6 +1323,7 @@ TEST_VARIATIONS_UPDATE = {
     "description": None,
     "position": 1,
     "default_price": "20.0",
+    "checkin_attention": False,
     "require_approval": False,
     "require_membership": False,
     "require_membership_hidden": False,
@@ -1244,7 +1332,8 @@ TEST_VARIATIONS_UPDATE = {
     "available_from": None,
     "available_until": None,
     "hide_without_voucher": False,
-    "original_price": None
+    "original_price": None,
+    "meta_data": {}
 }
 
 
@@ -1281,7 +1370,10 @@ def test_variations_create(token_client, organizer, event, item, variation):
             "position": 1,
             "default_price": None,
             "original_price": "23.42",
-            "price": 23.0
+            "price": 23.0,
+            "meta_data": {
+                "day": "Wednesday",
+            },
         },
         format='json'
     )
@@ -1291,6 +1383,7 @@ def test_variations_create(token_client, organizer, event, item, variation):
     assert var.position == 1
     assert var.price == 23.0
     assert set(var.sales_channels) == set(get_all_sales_channels().keys())
+    assert var.meta_data == {"day": "Wednesday"}
 
 
 @pytest.mark.django_db
@@ -1322,6 +1415,7 @@ def test_variations_update(token_client, organizer, event, item, item3, variatio
     res["price"] = "20.00"
     res["default_price"] = "20.00"
     res["original_price"] = "50.00"
+    res["meta_data"] = {"day": "Thursday"}
     resp = token_client.patch(
         '/api/v1/organizers/{}/events/{}/items/{}/variations/{}/'.format(organizer.slug, event.slug, item.pk, variation.pk),
         {
@@ -1331,7 +1425,10 @@ def test_variations_update(token_client, organizer, event, item, item3, variatio
             "position": 1,
             "sales_channels": ["web"],
             "default_price": "20.00",
-            "original_price": "50.00"
+            "original_price": "50.00",
+            "meta_data": {
+                "day": "Thursday",
+            },
         },
         format='json'
     )

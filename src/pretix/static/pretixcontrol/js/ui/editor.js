@@ -118,6 +118,7 @@ var editor = {
     uploaded_file_id: null,
     _window_loaded: false,
     _fabric_loaded: false,
+    schema: null,
 
     _px2mm: function (v) {
         return v / editor.pdf_scale / 72 * editor.pdf_page.userUnit * 25.4;
@@ -160,8 +161,8 @@ var editor = {
                     left: editor._px2mm(left).toFixed(2),
                     bottom: editor._px2mm(bottom).toFixed(2),
                     fontsize: editor._px2pt(o.getFontSize()).toFixed(1),
+                    lineheight: o.lineHeight,
                     color: col,
-                    //lineheight: o.lineHeight,
                     fontfamily: o.fontFamily,
                     bold: o.fontWeight === 'bold',
                     italic: o.fontStyle === 'italic',
@@ -192,6 +193,7 @@ var editor = {
                     size: editor._px2mm(o.height * o.scaleY).toFixed(2),
                     content: o.content,
                     text: o.text,
+                    text_i18n: o.text_i18n || {},
                     nowhitespace: o.nowhitespace || false,
                 });
             } else  if (o.type === "poweredby") {
@@ -219,6 +221,11 @@ var editor = {
             o.content = d.content;
             o.scaleToHeight(editor._mm2px(d.size));
             o.nowhitespace = d.nowhitespace || false;
+            if (d.content === "other") {
+                o.text = d.text
+            } else if (d.content === "other_i18n") {
+                o.text_i18n = d.text_i18n
+            }
         } else if (d.type === "imagearea") {
             o = editor._add_imagearea(d.content);
             o.content = d.content;
@@ -234,7 +241,7 @@ var editor = {
             o = editor._add_text();
             o.setColor('rgb(' + d.color[0] + ',' + d.color[1] + ',' + d.color[2] + ')');
             o.setFontSize(editor._pt2px(d.fontsize));
-            //o.setLineHeight(d.lineheight);
+            o.setLineHeight(d.lineheight || 1);
             o.setFontFamily(d.fontfamily);
             o.setFontWeight(d.bold ? 'bold' : 'normal');
             o.setFontStyle(d.italic ? 'italic' : 'normal');
@@ -250,7 +257,7 @@ var editor = {
             } else if (d.content === "other_i18n") {
                 o.text_i18n = d.text_i18n
                 o.setText(d.text_i18n[Object.keys(d.text_i18n)[0]]);
-            } else {
+            } else if (d.content) {
                 o.setText(editor._get_text_sample(d.content));
             }
             if (d.locale) {
@@ -286,7 +293,7 @@ var editor = {
         } else if (key.startsWith('meta:')) {
             return key.substr(5);
         }
-        return $('#toolbox-content option[value='+key+'], #toolbox-content option[data-old-value='+key+']').attr('data-sample') || '';
+        return $('#toolbox-content option[value="'+key+'"], #toolbox-content option[data-old-value="'+key+'"]').attr('data-sample') || '???';
     },
 
     _load_page: function (page_number, dump) {
@@ -294,17 +301,20 @@ var editor = {
 
         // Fetch the required page
         editor.pdf.getPage(page_number).then(function (page) {
-            console.log('Page loaded');
             var canvas = document.getElementById('pdf-canvas');
 
-            var scale = editor.$cva.width() / page.getViewport(1.0).width;
-            var viewport = page.getViewport(scale);
+            var scale = editor.$cva.width() / page.getViewport({scale: 1.0}).width;
+            var viewport = page.getViewport({ scale: scale });
+            var outputScale = window.devicePixelRatio || 1;
 
             // Prepare canvas using PDF page dimensions
             var context = canvas.getContext('2d');
             context.clearRect(0, 0, canvas.width, canvas.height);
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
+            canvas.width = Math.floor(viewport.width * outputScale);
+            canvas.height = Math.floor(viewport.height * outputScale);
+            canvas.style.width = Math.floor(viewport.width) + "px";
+            canvas.style.height =  Math.floor(viewport.height) + "px";
+            var transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
 
             editor.pdf_page = page;
             editor.pdf_scale = scale;
@@ -313,14 +323,14 @@ var editor = {
             // Render PDF page into canvas context
             var renderContext = {
                 canvasContext: context,
-                viewport: viewport
+                transform: transform,
+                viewport: viewport,
             };
             var renderTask = page.render(renderContext);
-            renderTask.then(function () {
+            renderTask.promise.then(function () {
                 editor.pdf_page_number = page_number
                 editor._init_page_nav();
 
-                console.log('Page rendered');
                 if (dump || !editor._fabric_loaded) {
                     editor._init_fabric(dump);
                 } else {
@@ -343,7 +353,6 @@ var editor = {
                 }
                 $("#page_nav").append($li)
                 $a.on("click", function (event) {
-                    console.log("switch to page", $(this).attr("data-page"));
                     editor.fabric.deactivateAll();
                     editor._load_page(parseInt($(this).attr("data-page")));
                     event.preventDefault();
@@ -358,12 +367,12 @@ var editor = {
         // TODO: Loading indicators
         var url = editor.pdf_url;
         // TODO: Handle cross-origin issues if static files are on a different origin
-        PDFJS.workerSrc = editor.$pdfcv.attr("data-worker-url");
+        var pdfjsLib = window['pdfjs-dist/build/pdf'];
+        pdfjsLib.GlobalWorkerOptions.workerSrc = editor.$pdfcv.attr("data-worker-url");
 
         // Asynchronous download of PDF
-        var loadingTask = PDFJS.getDocument(url);
+        var loadingTask = pdfjsLib.getDocument(url);
         loadingTask.promise.then(function (pdf) {
-            console.log('PDF loaded');
 
             editor.pdf = pdf;
             editor.pdf_page_count = pdf.numPages;
@@ -379,8 +388,8 @@ var editor = {
     },
 
     _init_fabric: function (dump) {
-        editor.$fcv.get(0).width = editor.$pdfcv.get(0).width;
-        editor.$fcv.get(0).height = editor.$pdfcv.get(0).height;
+        editor.$fcv.get(0).width = editor.pdf_viewport.width;
+        editor.$fcv.get(0).height = editor.pdf_viewport.height;
         editor.fabric = new fabric.Canvas('fabric-canvas');
 
         editor.fabric.on('object:modified', editor._create_savepoint);
@@ -416,7 +425,6 @@ var editor = {
         }
 
         editor._fabric_loaded = true;
-        console.log("Fabric loaded");
         if (editor._window_loaded) {
             editor._ready();
         }
@@ -424,7 +432,6 @@ var editor = {
 
     _window_load_event: function () {
         editor._window_loaded = true;
-        console.log("Window loaded");
         if (editor._fabric_loaded) {
             editor._ready();
         }
@@ -432,10 +439,9 @@ var editor = {
 
     _ready: function () {
         var isOpera = (!!window.opr && !!opr.addons) || !!window.opera || navigator.userAgent.indexOf(' OPR/') >= 0;
-        var isFirefox = typeof InstallTrigger !== 'undefined';
-        var isChrome = !!window.chrome && (!!window.chrome.webstore || !!window.chrome.runtime);
-        var isEdgeChromium = isChrome && (navigator.userAgent.indexOf("Edg") != -1);
-        if (isChrome || isOpera || isFirefox || isEdgeChromium) {
+        var isFirefox = navigator.userAgent.indexOf("Firefox") > 0;
+        var isChromeBased = !!window.chrome;
+        if (isChromeBased || isOpera || isFirefox) {
             $("#loading-container").hide();
             $("#loading-initial").remove();
         } else {
@@ -477,7 +483,7 @@ var editor = {
             var col = (new fabric.Color(o.getFill()))._source;
             $("#toolbox-col").val("#" + ((1 << 24) + (col[0] << 16) + (col[1] << 8) + col[2]).toString(16).slice(1));
             $("#toolbox-fontsize").val(editor._px2pt(o.fontSize).toFixed(1));
-            //$("#toolbox-lineheight").val(o.lineHeight);
+            $("#toolbox-lineheight").val(o.lineHeight || 1);
             $("#toolbox-fontfamily").val(o.fontFamily);
             $("#toolbox").find("button[data-action=bold]").toggleClass('active', o.fontWeight === 'bold');
             $("#toolbox").find("button[data-action=italic]").toggleClass('active', o.fontStyle === 'italic');
@@ -514,7 +520,7 @@ var editor = {
         }
     },
 
-    _update_values_from_toolbox: function () {
+    _update_values_from_toolbox: function (e) {
         var o = editor.fabric.getActiveObject();
         if (!o) {
             o = editor.fabric.getActiveGroup();
@@ -547,8 +553,16 @@ var editor = {
             $("#toolbox-content-other-help").toggle($("#toolbox-content").val() === "other" || $("#toolbox-content").val() === "other_i18n");
             o.content = $("#toolbox-content").val();
             if ($("#toolbox-content").val() === "other") {
+                if (e.target.id === "toolbox-content") {
+                    // user used dropdown to switch content-type, update value with value from i18n textarea
+                    $("#toolbox-content-other").val($("#toolbox-content-other-i18n textarea").val());
+                }
                 o.text = $("#toolbox-content-other").val();
             } else if ($("#toolbox-content").val() === "other_i18n") {
+                if (e.target.id === "toolbox-content") {
+                    // user used dropdown to switch content-type, update value with value from "other" textarea
+                    $("#toolbox-content-other-i18n textarea").val($("#toolbox-content-other").val());
+                }
                 o.text_i18n = {}
                 $("#toolbox-content-other-i18n textarea").each(function () {
                     o.text_i18n[$(this).attr("lang")] = $(this).val();
@@ -586,7 +600,7 @@ var editor = {
         } else if (o.type === "textarea" || o.type === "text") {
             o.setColor($("#toolbox-col").val());
             o.setFontSize(editor._pt2px($("#toolbox-fontsize").val()));
-            //o.setLineHeight($("#toolbox-lineheight").val());
+            o.setLineHeight($("#toolbox-lineheight").val() || 1);
             o.setFontFamily($("#toolbox-fontfamily").val());
             o.setFontWeight($("#toolbox").find("button[data-action=bold]").is('.active') ? 'bold' : 'normal');
             o.setFontStyle($("#toolbox").find("button[data-action=italic]").is('.active') ? 'italic' : 'normal');
@@ -602,8 +616,16 @@ var editor = {
             $("#toolbox-content-other-help").toggle($("#toolbox-content").val() === "other" || $("#toolbox-content").val() === "other_i18n");
             o.content = $("#toolbox-content").val();
             if ($("#toolbox-content").val() === "other") {
+                if (e.target.id === "toolbox-content") {
+                    // user used dropdown to switch content-type, update value with value from i18n textarea
+                    $("#toolbox-content-other").val($("#toolbox-content-other-i18n textarea").val());
+                }
                 o.setText($("#toolbox-content-other").val());
             } else if ($("#toolbox-content").val() === "other_i18n") {
+                if (e.target.id === "toolbox-content") {
+                    // user used dropdown to switch content-type, update value with value from "other" textarea
+                    $("#toolbox-content-other-i18n textarea").val($("#toolbox-content-other").val());
+                }
                 o.text_i18n = {}
                 $("#toolbox-content-other-i18n textarea").each(function () {
                     o.text_i18n[$(this).attr("lang")] = $(this).val();
@@ -612,6 +634,14 @@ var editor = {
             } else {
                 o.setText(editor._get_text_sample($("#toolbox-content").val()));
             }
+        }
+
+        // empty text-inputs if not in use
+        if ($("#toolbox-content").val() !== "other") {
+            $("#toolbox-content-other").val("");
+        }
+        if ($("#toolbox-content").val() !== "other_i18n") {
+            $("#toolbox-content-other-i18n textarea").val("");
         }
 
         o.setCoords();
@@ -658,7 +688,7 @@ var editor = {
             lockRotation: false,
             fontFamily: 'Open Sans',
             lineHeight: 1,
-            content: 'item',
+            content: 'event_name',
             editable: false,
             fontSize: editor._pt2px(13)
         });
@@ -831,36 +861,37 @@ var editor = {
                 thing.setCoords();
                 editor._create_savepoint();
                 break;
+            case 8:  /* Backspace */
             case 46:  /* Delete */
                 editor._delete();
                 break;
             case 65:  /* A */
-                if (e.ctrlKey) {
+                if (e.ctrlKey || e.metaKey) {
                     editor._selectAll();
                 }
                 break;
             case 89:  /* Y */
-                if (e.ctrlKey) {
+                if (e.ctrlKey || e.metaKey) {
                     editor._redo();
                 }
                 break;
             case 90:  /* Z */
-                if (e.ctrlKey) {
+                if (e.ctrlKey || e.metaKey) {
                     editor._undo();
                 }
                 break;
             case 88:  /* X */
-                if (e.ctrlKey) {
+                if (e.ctrlKey || e.metaKey) {
                     editor._cut();
                 }
                 break;
             case 86:  /* V */
-                if (e.ctrlKey) {
+                if (e.ctrlKey || e.metaKey) {
                     editor._paste();
                 }
                 break;
             case 67:  /* C */
-                if (e.ctrlKey) {
+                if (e.ctrlKey || e.metaKey) {
                     editor._copy();
                 }
                 break;
@@ -935,10 +966,10 @@ var editor = {
         return false;
     },
 
-    _preview: function () {
+    _preview: function (e) {
         $("#preview-form input[name=data]").val(JSON.stringify(editor.dump()));
         $("#preview-form input[name=background]").val(editor.uploaded_file_id);
-        $("#preview-form").get(0).submit();
+        if (!e || !e.target.form) $("#preview-form").get(0).submit();
     },
 
     _replace_pdf_file: function (url) {
@@ -959,8 +990,26 @@ var editor = {
     },
 
     _source_save: function () {
-        editor.load(JSON.parse($("#source-textarea").val()));
-        $("#source-container").hide();
+        try {
+            var Ajv = window.ajv2020
+            var ajv = new Ajv()
+            var validate = ajv.compile(editor.schema)
+            var data = JSON.parse($("#source-textarea").val())
+            var valid = validate(data)
+
+            if (!valid) {
+                console.log(validate.errors)
+                alert("Invalid input syntax. If you're familiar with this, check out the developer console for a full " +
+                      "error log. Otherwise, please contact support.")
+            } else {
+                editor.load(data);
+                $("#source-container").hide();
+            }
+        } catch (e) {
+            console.error(e)
+            alert("Parsing error. If you're familiar with this, check out the developer console for a full " +
+                "error log. Otherwise, please contact support.")
+        }
     },
 
     _create_empty_background: function () {
@@ -1049,14 +1098,14 @@ var editor = {
         $("#toolbox label.btn").bind('click change', editor._update_values_from_toolbox);
         $("#toolbox select").bind('change', editor._update_values_from_toolbox);
         $("#toolbox select").bind('change', editor._create_savepoint);
-        $("#toolbox button.toggling").bind('click change', function () {
+        $("#toolbox button.toggling").bind('click change', function (e) {
             if ($(this).is(".option")) {
                 $(this).addClass("active");
                 $(this).parent().siblings().find("button").removeClass("active");
             } else {
                 $(this).toggleClass("active");
             }
-            editor._update_values_from_toolbox();
+            editor._update_values_from_toolbox(e);
             editor._create_savepoint();
         });
         $("#toolbox .colorpickerfield").bind('changeColor', editor._update_values_from_toolbox);
@@ -1069,6 +1118,10 @@ var editor = {
         $("#toolbox-source").bind('click', editor._source_show);
         $("#source-close").bind('click', editor._source_close);
         $("#source-save").bind('click', editor._source_save);
+
+        $.getJSON($("#schema-url").text(), function (data) {
+            editor.schema = data;
+        })
     }
 };
 

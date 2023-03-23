@@ -41,6 +41,8 @@ from decimal import Decimal
 from itertools import groupby
 from urllib.parse import urlsplit
 
+import bleach
+from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
@@ -57,7 +59,7 @@ from django.urls import reverse
 from django.utils.functional import cached_property
 from django.utils.timezone import now
 from django.utils.translation import gettext, gettext_lazy as _
-from django.views.generic import DeleteView, FormView, ListView
+from django.views.generic import FormView, ListView
 from django.views.generic.base import TemplateView, View
 from django.views.generic.detail import SingleObjectMixin
 from i18nfield.strings import LazyI18nString
@@ -74,9 +76,9 @@ from pretix.base.signals import register_ticket_outputs
 from pretix.base.templatetags.rich_text import markdown_compile_email
 from pretix.control.forms.event import (
     CancelSettingsForm, CommentForm, ConfirmTextFormset, EventDeleteForm,
-    EventMetaValueForm, EventSettingsForm, EventUpdateForm,
-    InvoiceSettingsForm, ItemMetaPropertyForm, MailSettingsForm,
-    PaymentSettingsForm, ProviderForm, QuickSetupForm,
+    EventFooterLinkFormset, EventMetaValueForm, EventSettingsForm,
+    EventUpdateForm, InvoiceSettingsForm, ItemMetaPropertyForm,
+    MailSettingsForm, PaymentSettingsForm, ProviderForm, QuickSetupForm,
     QuickSetupProductFormSet, TaxRuleForm, TaxRuleLineFormSet,
     TicketSettingsForm, WidgetCodeForm,
 )
@@ -92,8 +94,9 @@ from ...base.i18n import language
 from ...base.models.items import (
     Item, ItemCategory, ItemMetaProperty, Question, Quota,
 )
-from ...base.services.mail import TolerantDict
 from ...base.settings import SETTINGS_AFFECTING_CSS, LazyI18nStringList
+from ...helpers.compat import CompatDeleteView
+from ...helpers.format import format_map
 from ..logdisplay import OVERVIEW_BANLIST
 from . import CreateView, PaginationMixin, UpdateView
 
@@ -186,6 +189,7 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
         context['meta_forms'] = self.meta_forms
         context['item_meta_property_formset'] = self.item_meta_property_formset
         context['confirm_texts_formset'] = self.confirm_texts_formset
+        context['footer_links_formset'] = self.footer_links_formset
         return context
 
     @transaction.atomic
@@ -195,6 +199,7 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
         self.save_meta()
         self.save_item_meta_property_formset(self.object)
         self.save_confirm_texts_formset(self.object)
+        self.save_footer_links_formset(self.object)
         change_css = False
 
         if self.sform.has_changed() or self.confirm_texts_formset.has_changed():
@@ -204,6 +209,10 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
             self.request.event.log_action('pretix.event.settings', user=self.request.user, data=data)
             if any(p in self.sform.changed_data for p in SETTINGS_AFFECTING_CSS):
                 change_css = True
+        if self.footer_links_formset.has_changed():
+            self.request.event.log_action('pretix.event.footerlinks.changed', user=self.request.user, data={
+                'data': self.footer_links_formset.cleaned_data
+            })
         if form.has_changed():
             self.request.event.log_action('pretix.event.changed', user=self.request.user, data={
                 k: (form.cleaned_data.get(k).name
@@ -238,7 +247,8 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
     def post(self, request, *args, **kwargs):
         form = self.get_form()
         if form.is_valid() and self.sform.is_valid() and all([f.is_valid() for f in self.meta_forms]) and \
-                self.item_meta_property_formset.is_valid() and self.confirm_texts_formset.is_valid():
+                self.item_meta_property_formset.is_valid() and self.confirm_texts_formset.is_valid() and \
+                self.footer_links_formset.is_valid():
             # reset timezone
             zone = timezone(self.sform.cleaned_data['timezone'])
             event = form.instance
@@ -292,9 +302,17 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
     def save_confirm_texts_formset(self, obj):
         obj.settings.confirm_texts = LazyI18nStringList(
             form_data['text'].data
-            for form_data in sorted(self.confirm_texts_formset.cleaned_data, key=operator.itemgetter("ORDER"))
-            if not form_data.get("DELETE", False)
+            for form_data in sorted((d for d in self.confirm_texts_formset.cleaned_data if d), key=operator.itemgetter("ORDER"))
+            if form_data and not form_data.get("DELETE", False)
         )
+
+    @cached_property
+    def footer_links_formset(self):
+        return EventFooterLinkFormset(self.request.POST if self.request.method == "POST" else None, event=self.object,
+                                      prefix="footer-links", instance=self.object)
+
+    def save_footer_links_formset(self, obj):
+        self.footer_links_formset.save()
 
 
 class EventPlugins(EventSettingsViewMixin, EventPermissionRequiredMixin, TemplateView, SingleObjectMixin):
@@ -371,7 +389,7 @@ class EventPlugins(EventSettingsViewMixin, EventPermissionRequiredMixin, Templat
                 if key.startswith("plugin:"):
                     module = key.split(":")[1]
                     if value == "enable" and module in plugins_available:
-                        if getattr(plugins_available[module], 'restricted', False):
+                        if getattr(plugins_available[module].app, 'restricted', False):
                             if module not in request.event.settings.allowed_restricted_plugins:
                                 continue
 
@@ -694,8 +712,11 @@ class MailSettingsPreview(EventPermissionRequiredMixin, View):
         ctx = {}
         for p in get_available_placeholders(self.request.event, MailSettingsForm.base_context[item]).values():
             s = str(p.render_sample(self.request.event))
-            if s.strip().startswith('*'):
-                ctx[p.identifier] = s
+            if s.strip().startswith('* '):
+                ctx[p.identifier] = '<div class="placeholder" title="{}">{}</div>'.format(
+                    _('This value will be replaced based on dynamic parameters.'),
+                    markdown_compile_email(s)
+                )
             else:
                 ctx[p.identifier] = '<span class="placeholder" title="{}">{}</span>'.format(
                     _('This value will be replaced based on dynamic parameters.'),
@@ -708,7 +729,7 @@ class MailSettingsPreview(EventPermissionRequiredMixin, View):
         if preview_item not in MailSettingsForm.base_context:
             return HttpResponseBadRequest(_('invalid item'))
 
-        regex = r"^" + re.escape(preview_item) + r"_(?P<idx>[\d+])$"
+        regex = r"^" + re.escape(preview_item) + r"_(?P<idx>[\d]+)$"
         msgs = {}
         for k, v in request.POST.items():
             # only accept allowed fields
@@ -717,9 +738,12 @@ class MailSettingsPreview(EventPermissionRequiredMixin, View):
                 idx = matched.group('idx')
                 if idx in self.supported_locale:
                     with language(self.supported_locale[idx], self.request.event.settings.region):
-                        msgs[self.supported_locale[idx]] = markdown_compile_email(
-                            v.format_map(self.placeholders(preview_item))
-                        )
+                        if k.startswith('mail_subject_'):
+                            msgs[self.supported_locale[idx]] = format_map(bleach.clean(v), self.placeholders(preview_item))
+                        else:
+                            msgs[self.supported_locale[idx]] = markdown_compile_email(
+                                format_map(v, self.placeholders(preview_item))
+                            )
 
         return JsonResponse({
             'item': preview_item,
@@ -742,7 +766,7 @@ class MailSettingsRendererPreview(MailSettingsPreview):
 
     def get(self, request, *args, **kwargs):
         v = str(request.event.settings.mail_text_order_placed)
-        v = v.format_map(TolerantDict(self.placeholders('mail_text_order_placed')))
+        v = format_map(v, self.placeholders('mail_text_order_placed'))
         renderers = request.event.get_html_mail_renderers()
         if request.GET.get('renderer') in renderers:
             with rolledback_transaction():
@@ -1005,9 +1029,27 @@ class EventDelete(RecentAuthenticationRequiredMixin, EventPermissionRequiredMixi
                 self.request.event.delete()
             messages.success(self.request, _('The event has been deleted.'))
             return redirect(self.get_success_url())
-        except ProtectedError:
-            messages.error(self.request, _('The event could not be deleted as some constraints (e.g. data created by '
-                                           'plug-ins) do not allow it.'))
+        except ProtectedError as e:
+            err = gettext('The event could not be deleted as some constraints (e.g. data created by plug-ins) do not allow it.')
+
+            app_labels = set()
+            for e in e.protected_objects:
+                app_labels.add(type(e)._meta.app_label)
+
+            plugin_names = []
+            for app_label in app_labels:
+                app = apps.get_app_config(app_label)
+                if hasattr(app, 'PretixPluginMeta'):
+                    plugin_names.append(str(app.PretixPluginMeta.name))
+                else:
+                    plugin_names.append(str(app.verbose_name))
+
+            if plugin_names:
+                err += ' ' + gettext(
+                    'Specifically, the following plugins still contain data depends on this event: {plugin_names}'
+                ).format(plugin_names=', '.join(plugin_names))
+
+            messages.error(self.request, err)
             return self.get(self.request, *self.args, **self.kwargs)
 
     def get_success_url(self) -> str:
@@ -1022,7 +1064,7 @@ class EventLog(EventPermissionRequiredMixin, PaginationMixin, ListView):
     def get_queryset(self):
         qs = self.request.event.logentry_set.all().select_related(
             'user', 'content_type', 'api_token', 'oauth_application', 'device'
-        ).order_by('-datetime')
+        ).order_by('-datetime', '-pk')
         qs = qs.exclude(action_type__in=OVERVIEW_BANLIST)
         if not self.request.user.has_event_permission(self.request.organizer, self.request.event, 'can_view_orders',
                                                       request=self.request):
@@ -1224,7 +1266,7 @@ class TaxUpdate(EventSettingsViewMixin, EventPermissionRequiredMixin, UpdateView
         return super().form_invalid(form)
 
 
-class TaxDelete(EventSettingsViewMixin, EventPermissionRequiredMixin, DeleteView):
+class TaxDelete(EventSettingsViewMixin, EventPermissionRequiredMixin, CompatDeleteView):
     model = TaxRule
     template_name = 'pretixcontrol/event/tax_delete.html'
     permission = 'can_change_event_settings'
@@ -1403,6 +1445,7 @@ class QuickSetupView(FormView):
                 default_price=f.cleaned_data['default_price'] or 0,
                 tax_rule=tax_rule,
                 admission=True,
+                personalized=True,
                 position=i,
                 sales_channels=list(get_all_sales_channels().keys())
             )

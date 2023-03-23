@@ -2,7 +2,7 @@
 
 .. _`config`:
 
-.. spelling:: Galera
+.. spelling:word-list:: Galera
 
 Configuration file
 ==================
@@ -84,7 +84,7 @@ Example::
     Enables or disables the "keep me logged in" button. Defaults to ``on``.
 
 ``ecb_rates``
-    By default, pretix periodically downloads a XML file from the European Central Bank to retrieve exchange rates
+    By default, pretix periodically downloads currency rates from the European Central Bank as well as other authorities
     that are used to print tax amounts in the customer currency on invoices for some currencies. Set to ``off`` to
     disable this feature. Defaults to ``on``.
 
@@ -106,6 +106,11 @@ Example::
     proxy that actively removes and re-adds the header to make sure the correct value is set.
     Defaults to ``off``.
 
+``trust_x_forwarded_host``
+    Specifies whether the ``X-Forwarded-Host`` header can be trusted. Only set to ``on`` if you have a reverse
+    proxy that actively removes and re-adds the header to make sure the correct value is set.
+    Defaults to ``off``.
+
 ``csp_log``
     Log violations of the Content Security Policy (CSP). Defaults to ``on``.
 
@@ -116,6 +121,9 @@ Example::
 
 ``loglevel``
     Set console and file log level (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR`` or ``CRITICAL``). Defaults to ``INFO``.
+
+``request_id_header``
+    Specifies the name of a header that should be used for logging request IDs. Off by default.
 
 Locale settings
 ---------------
@@ -138,7 +146,7 @@ Database settings
 Example::
 
     [database]
-    backend=mysql
+    backend=postgresql
     name=pretix
     user=pretix
     password=abcd
@@ -146,7 +154,7 @@ Example::
     port=3306
 
 ``backend``
-    One of ``mysql``, ``sqlite3``, ``oracle`` and ``postgresql``.
+    One of ``mysql`` (deprecated), ``sqlite3`` and ``postgresql``.
     Default: ``sqlite3``.
 
     If you use MySQL, be sure to create your database using
@@ -160,7 +168,7 @@ Example::
     Connection details for the database connection. Empty by default.
 
 ``galera``
-    Indicates if the database backend is a MySQL/MariaDB Galera cluster and
+    (Deprecated) Indicates if the database backend is a MySQL/MariaDB Galera cluster and
     turns on some optimizations/special case handlers. Default: ``False``
 
 .. _`config-replica`:
@@ -191,7 +199,7 @@ Example::
 
     [urls]
     media=/media/
-    static=/media/
+    static=/static/
 
 ``media``
     The URL to be used to serve user-uploaded content. You should not need to modify
@@ -396,9 +404,9 @@ The two ``transport_options`` entries can be omitted in most cases.
 If they are present they need to be a valid JSON dictionary.
 For possible entries in that dictionary see the `Celery documentation`_.
 
-To use redis with sentinels set the broker or backend to ``sentinel://sentinel_host_1:26379;sentinal_host_2:26379/0``
+To use redis with sentinels set the broker or backend to ``sentinel://sentinel_host_1:26379;sentinel_host_2:26379/0``
 and the respective transport_options to ``{"master_name":"mymaster"}``.
-If your redis instances behind the sentinel have a password use ``sentinel://:my_password@sentinel_host_1:26379;sentinal_host_2:26379/0``.
+If your redis instances behind the sentinel have a password use ``sentinel://:my_password@sentinel_host_1:26379;sentinel_host_2:26379/0``.
 If your redis sentinels themselves have a password set the transport_options to ``{"master_name":"mymaster","sentinel_kwargs":{"password":"my_password"}}``.
 
 Sentry

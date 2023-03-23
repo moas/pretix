@@ -70,6 +70,7 @@ function async_task_check_error(jqXHR, textStatus, errorThrown) {
             jqXHR.responseText.indexOf("<body"),
             jqXHR.responseText.indexOf("</body")
         ));
+        setup_basics($("body"));
         form_handlers($("body"));
         setup_collapsible_details($("body"));
         window.setTimeout(function () { $(window).scrollTop(0) }, 200)
@@ -152,6 +153,7 @@ function async_task_error(jqXHR, textStatus, errorThrown) {
 
             if (respdom.filter('#page-wrapper') && $('#page-wrapper').length) {
                 $("#page-wrapper").html(respdom.find("#page-wrapper").html());
+                setup_basics($("#page-wrapper"));
                 form_handlers($("#page-wrapper"));
                 setup_collapsible_details($("#page-wrapper"));
                 $(document).trigger("pretix:bind-forms");
@@ -161,6 +163,7 @@ function async_task_error(jqXHR, textStatus, errorThrown) {
                     jqXHR.responseText.indexOf("<body"),
                     jqXHR.responseText.indexOf("</body")
                 ));
+                setup_basics($("body"));
                 form_handlers($("body"));
                 setup_collapsible_details($("body"));
                 $(document).trigger("pretix:bind-forms");
@@ -189,6 +192,13 @@ function async_task_error(jqXHR, textStatus, errorThrown) {
 $(function () {
     "use strict";
     $("body").on('submit', 'form[data-asynctask]', function (e) {
+        // Not supported on IE, may lead to wrong results, but we don't support IE in the backend anymore
+        var submitter = e.originalEvent ? e.originalEvent.submitter : null;
+
+        if (submitter && submitter.hasAttribute("data-no-asynctask")) {
+            return;
+        }
+
         e.preventDefault();
         $(this).removeClass("dirty");  // Avoid problems with are-you-sure.js
         if ($("body").data('ajaxing')) {
@@ -215,14 +225,19 @@ $(function () {
             'this page and try again.'
         ));
 
-
-        console.log($(this).get(0))
-        var formData = new FormData($(this).get(0))
+        var action = this.action;
+        var formData = new FormData(this);
         formData.append('ajax', '1');
+        if (submitter && submitter.name) {
+            formData.append(submitter.name, submitter.value);
+        }
+        if (submitter && submitter.getAttribute("formaction")) {
+            action = submitter.getAttribute("formaction");
+        }
         $.ajax(
             {
                 'type': 'POST',
-                'url': $(this).attr('action'),
+                'url': action,
                 'data': formData,
                 processData: false,
                 contentType: false,

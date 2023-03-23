@@ -1,4 +1,4 @@
-.. spelling::
+.. spelling:word-list::
 
    checkins
    pdf
@@ -60,6 +60,7 @@ invoice_address                       object                     Invoice address
 ├ state                               string                     Customer state (ISO 3166-2 code). Only supported in
                                                                  AU, BR, CA, CN, MY, MX, and US.
 ├ internal_reference                  string                     Customer's internal reference to be printed on the invoice
+├ custom_field                        string                     Custom invoice address field
 ├ vat_id                              string                     Customer VAT ID
 └ vat_id_validated                    string                     ``true``, if the VAT ID has been validated against the
                                                                  EU VAT service and validation was successful. This only
@@ -90,36 +91,16 @@ require_approval                      boolean                    If ``true`` and
                                                                  needs approval by an organizer before it can
                                                                  continue. If ``true`` and the order is canceled,
                                                                  this order has been denied by the event organizer.
+valid_if_pending                      boolean                    If ``true`` and the order is pending, this order
+                                                                 is still treated like a paid order for most purposes,
+                                                                 such as check-in. This may be used e.g. for trusted
+                                                                 customers who only need to pay after the event.
 url                                   string                     The full URL to the order confirmation page
 payments                              list of objects            List of payment processes (see below)
 refunds                               list of objects            List of refund processes (see below)
 last_modified                         datetime                   Last modification of this object
 ===================================== ========================== =======================================================
 
-
-.. versionchanged:: 3.5
-
-   The ``order.fees.canceled`` attribute has been added.
-
-.. versionchanged:: 3.8
-
-   The ``reactivate`` operation has been added.
-
-.. versionchanged:: 3.10
-
-   The ``search`` query parameter has been added.
-
-.. versionchanged:: 3.11
-
-   The ``exclude`` and ``subevent_after`` query parameter has been added.
-
-.. versionchanged:: 3.13
-
-   The ``subevent_before`` query parameter has been added.
-
-.. versionchanged:: 3.14
-
-   The ``phone`` attribute has been added.
 
 .. versionchanged:: 4.0
 
@@ -140,6 +121,14 @@ last_modified                         datetime                   Last modificati
 .. versionchanged:: 4.8
 
    The ``order.fees.id`` attribute has been added.
+
+.. versionchanged:: 4.15
+
+   The ``include`` query parameter has been added.
+
+.. versionchanged:: 4.16
+
+   The ``valid_if_pending`` attribute has been added.
 
 
 .. _order-position-resource:
@@ -177,6 +166,10 @@ tax_rule                              integer                    The ID of the u
 secret                                string                     Secret code printed on the tickets for validation
 addon_to                              integer                    Internal ID of the position this position is an add-on for (or ``null``)
 subevent                              integer                    ID of the date inside an event series this position belongs to (or ``null``).
+discount                              integer                    ID of a discount that has been used during the creation of this position in some way (or ``null``).
+blocked                               list of strings            A list of strings, or ``null``. Whenever not ``null``, the ticket may not be used (e.g. for check-in).
+valid_from                            datetime                   The ticket will not be valid before this time. Can be ``null``.
+valid_until                           datetime                   The ticket will not be valid after this time. Can be ``null``.
 pseudonymization_id                   string                     A random ID, e.g. for use in lead scanning apps
 checkins                              list of objects            List of **successful** check-ins with this ticket
 ├ id                                  integer                    Internal ID of the check-in event
@@ -204,26 +197,9 @@ pdf_data                              object                     Data object req
                                                                  ``pdf_data=true`` query parameter to your request.
 ===================================== ========================== =======================================================
 
-.. versionchanged:: 3.3
+.. versionchanged:: 4.16
 
-  The ``url`` of a ticket ``download`` can now also return a ``text/uri-list`` instead of a file. See
-  :ref:`order-position-ticket-download` for details.
-
-.. versionchanged:: 3.5
-
-  The attribute ``canceled`` has been added.
-
-.. versionchanged:: 3.8
-
-  The attributes ``company``, ``street``, ``zipcode``, ``city``, ``country``, and ``state`` have been added.
-
-.. versionchanged:: 3.9
-
-  The ``checkin.type`` attribute has been added.
-
-.. versionchanged:: 3.16
-
-   Answers to file questions are now returned as an URL.
+   The attributes ``blocked``, ``valid_from`` and ``valid_until`` have been added.
 
 .. _order-payment-resource:
 
@@ -271,14 +247,19 @@ created                               datetime                   Date and time o
 comment                               string                     Reason for refund (shown to the customer in some cases, can be ``null``).
 execution_date                        datetime                   Date and time of completion of this refund (or ``null``)
 provider                              string                     Identification string of the payment provider
+details                               object                     Refund-specific information. This is a dictionary
+                                                                 with various fields that can be different between
+                                                                 payment providers, versions, payment states, etc. If
+                                                                 you read this field, you always need to be able to
+                                                                 deal with situations where values that you expect are
+                                                                 missing. Mostly, the field contains various IDs that
+                                                                 can be used for matching with other systems. If a
+                                                                 payment provider does not implement this feature,
+                                                                 the object is empty.
 ===================================== ========================== =======================================================
 
 List of all orders
 ------------------
-
-.. versionchanged:: 3.5
-
-   The ``include_canceled_positions`` and ``include_canceled_fees`` query parameters have been added.
 
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/orders/
 
@@ -328,6 +309,7 @@ List of all orders
             "custom_followup_at": null,
             "checkin_attention": false,
             "require_approval": false,
+            "valid_if_pending": false,
             "invoice_address": {
                 "last_modified": "2017-12-01T10:00:00Z",
                 "is_business": true,
@@ -370,6 +352,10 @@ List of all orders
                 "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
                 "addon_to": null,
                 "subevent": null,
+                "valid_from": null,
+                "valid_until": null,
+                "blocked": null,
+                "discount": null,
                 "pseudonymization_id": "MQLJvANO3B",
                 "seat": null,
                 "checkins": [
@@ -427,7 +413,7 @@ List of all orders
                            ``last_modified``, and ``status``. Default: ``datetime``
    :query string code: Only return orders that match the given order code
    :query string status: Only return orders in the given order status (see above)
-   :query string search: Only return orders matching a given search query
+   :query string search: Only return orders matching a given search query (matching for names, email addresses, and company names)
    :query integer item: Only return orders with a position that contains this item ID. *Warning:* Result will also include orders if they contain mixed items, and it will even return orders where the item is only contained in a canceled position.
    :query integer variation: Only return orders with a position that contains this variation ID. *Warning:* Result will also include orders if they contain mixed items and variations, and it will even return orders where the variation is only contained in a canceled position.
    :query boolean testmode: Only return orders with ``testmode`` set to ``true`` or ``false``
@@ -446,6 +432,7 @@ List of all orders
    :query datetime subevent_after: Only return orders that contain a ticket for a subevent taking place after the given date. This is an exclusive after, and it considers the **end** of the subevent (or its start, if the end is not set).
    :query datetime subevent_before: Only return orders that contain a ticket for a subevent taking place after the given date. This is an exclusive before, and it considers the **start** of the subevent.
    :query string exclude: Exclude a field from the output, e.g. ``fees`` or ``positions.downloads``. Can be used as a performance optimization. Can be passed multiple times.
+   :query string include: Include only the given field in the output, e.g. ``fees`` or ``positions.downloads``. Can be used as a performance optimization. Can be passed multiple times. ``include`` is applied before ``exclude``, so ``exclude`` takes precedence.
    :param organizer: The ``slug`` field of the organizer to fetch
    :param event: The ``slug`` field of the event to fetch
    :resheader X-Page-Generated: The server time at the beginning of the operation. If you're using this API to fetch
@@ -456,10 +443,6 @@ List of all orders
 
 Fetching individual orders
 --------------------------
-
-.. versionchanged:: 3.5
-
-   The ``include_canceled_positions`` and ``include_canceled_fees`` query parameters have been added.
 
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/
 
@@ -503,6 +486,7 @@ Fetching individual orders
         "custom_followup_at": null,
         "checkin_attention": false,
         "require_approval": false,
+        "valid_if_pending": false,
         "invoice_address": {
             "last_modified": "2017-12-01T10:00:00Z",
             "company": "Sample company",
@@ -545,6 +529,10 @@ Fetching individual orders
             "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
             "addon_to": null,
             "subevent": null,
+            "valid_from": null,
+            "valid_until": null,
+            "blocked": null,
+            "discount": null,
             "pseudonymization_id": "MQLJvANO3B",
             "seat": null,
             "checkins": [
@@ -609,13 +597,17 @@ Fetching individual orders
 Order ticket download
 ---------------------
 
+.. versionchanged:: 4.10
+
+   The API now supports ticket downloads for pending orders if allowed by the event settings.
+
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/download/(output)/
 
    Download tickets for an order, identified by its order code. Depending on the chosen output, the response might
    be a ZIP file, PDF file or something else. The order details response contains a list of output options for this
    particular order.
 
-   Tickets can be only downloaded if the order is paid and if ticket downloads are active. Note that in some cases the
+   Tickets can only be downloaded if ticket downloads are active and – depending on event settings – the order is either paid or pending. Note that in some cases the
    ticket file might not yet have been created. In that case, you will receive a status code :http:statuscode:`409` and
    you are expected to retry the request after a short period of waiting.
 
@@ -670,6 +662,8 @@ Updating order fields
    * ``custom_followup_at``
 
    * ``invoice_address`` (you always need to supply the full object, or ``null`` to delete the current address)
+
+   * ``valid_if_pending``
 
    **Example request**:
 
@@ -846,9 +840,10 @@ Creating orders
 
        * does not support or validate memberships
 
+
    You can supply the following fields of the resource:
 
-   * ``code`` (optional)
+   * ``code`` (optional) – Only ``A-Z`` and ``0-9``, but without ``O`` and ``1``.
    * ``status`` (optional) – Defaults to pending for non-free orders and paid for free orders. You can only set this to
      ``"n"`` for pending or ``"p"`` for paid. We will create a payment object for this order either in state ``created``
      or in state ``confirmed``, depending on this value. If you create a paid order, the ``order_paid`` signal will
@@ -876,6 +871,7 @@ Creating orders
    * ``custom_followup_at`` (optional)
    * ``checkin_attention`` (optional)
    * ``require_approval`` (optional)
+   * ``valid_if_pending`` (optional)
    * ``invoice_address`` (optional)
 
       * ``company``
@@ -911,6 +907,9 @@ Creating orders
       * ``secret`` (optional)
       * ``addon_to`` (optional, see below)
       * ``subevent`` (optional)
+      * ``valid_from`` (optional, if both ``valid_from`` and ``valid_until`` are **missing** (not ``null``) the availability will be computed from the given product)
+      * ``valid_until`` (optional, if both ``valid_from`` and ``valid_until`` are **missing** (not ``null``) the availability will be computed from the given product)
+      * ``requested_valid_from`` (optional, can be set **instead** of ``valid_from`` and ``valid_until`` to signal a user choice for the start time that may or may not be respected)
       * ``answers``
 
         * ``question``
@@ -981,7 +980,7 @@ Creating orders
           "street": "Sesam Street 12",
           "zipcode": "12345",
           "city": "Sample City",
-          "country": "UK",
+          "country": "GB",
           "state": "",
           "internal_reference": "",
           "vat_id": ""
@@ -1029,10 +1028,6 @@ Creating orders
 
 Order state operations
 ----------------------
-
-.. versionchanged:: 3.12
-
-   The ``mark_paid`` operation now takes a ``send_email`` parameter.
 
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/mark_paid/
 
@@ -1435,10 +1430,6 @@ Sending e-mails
 List of all order positions
 ---------------------------
 
-.. versionchanged:: 3.5
-
-   The ``include_canceled_positions`` and ``include_canceled_fees`` query parameters have been added.
-
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/
 
    Returns a list of all order positions within a given event.
@@ -1482,10 +1473,14 @@ List of all order positions
             "tax_rule": null,
             "tax_value": "0.00",
             "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
+            "discount": null,
             "pseudonymization_id": "MQLJvANO3B",
             "seat": null,
             "addon_to": null,
             "subevent": null,
+            "valid_from": null,
+            "valid_until": null,
+            "blocked": null,
             "checkins": [
               {
                 "list": 44,
@@ -1592,6 +1587,10 @@ Fetching individual positions
         "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
         "addon_to": null,
         "subevent": null,
+        "valid_from": null,
+        "valid_until": null,
+        "blocked": null,
+        "discount": null,
         "pseudonymization_id": "MQLJvANO3B",
         "seat": null,
         "checkins": [
@@ -1635,6 +1634,10 @@ Fetching individual positions
 Order position ticket download
 ------------------------------
 
+.. versionchanged:: 4.10
+
+   The API now supports ticket downloads for pending orders if allowed by the event settings.
+
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/(id)/download/(output)/
 
    Download tickets for one order position, identified by its internal ID.
@@ -1646,7 +1649,7 @@ Order position ticket download
    The referenced URL can provide a download or a regular, human-viewable website - so it is advised to open this URL
    in a webbrowser and leave it up to the user to handle the result.
 
-   Tickets can be only downloaded if the order is paid and if ticket downloads are active. Also, depending on event
+   Tickets can only be downloaded if ticket downloads are active and – depending on event settings – the order is either paid or pending. Also, depending on event
    configuration downloads might be only unavailable for add-on products or non-admission products.
    Note that in some cases the ticket file might not yet have been created. In that case, you will receive a status
    code :http:statuscode:`409` and you are expected to retry the request after a short period of waiting.
@@ -1687,14 +1690,14 @@ Order position ticket download
 Manipulating individual positions
 ---------------------------------
 
-.. versionchanged:: 3.15
-
-   The ``PATCH`` method has been added for individual positions.
-
 .. versionchanged:: 4.8
 
    The ``PATCH`` method now supports changing items, variations, subevents, seats, prices, and tax rules.
    The ``POST`` endpoint to add individual positions has been added.
+
+.. versionadded:: 4.16
+
+   The endpoints to manage blocks have been added.
 
 .. http:patch:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/(id)/
 
@@ -1733,6 +1736,10 @@ Manipulating individual positions
    * ``price``
 
    * ``tax_rule``
+
+   * ``valid_from``
+
+   * ``valid_until``
 
    Changing parameters such as ``item`` or ``price`` will **not** automatically trigger creation of a new invoice,
    you need to take care of that yourself.
@@ -1808,6 +1815,10 @@ Manipulating individual positions
      and ``option_identifiers`` will be ignored. As a special case, you can submit the magic value
      ``"file:keep"`` as the answer to a file question to keep the current value without re-uploading it.
 
+   * ``valid_from``
+
+   * ``valid_until``
+
    This will **not** automatically trigger creation of a new invoice, you need to take care of that yourself.
 
    **Example request**:
@@ -1871,6 +1882,82 @@ Manipulating individual positions
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
    :statuscode 404: The requested order position does not exist.
 
+.. http:post:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/(id)/add_block/
+
+   Blocks an order position from being used. The block name either needs to be ``"admin"`` or start with ``"api:"``. It
+   may only contain letters, numbers, dots and underscores. ``"admin"`` represents the regular block that can be set
+   in the backend user interface.
+
+   **Example request**:
+
+   .. sourcecode:: http
+
+      POST /api/v1/organizers/bigevents/events/sampleconf/orderpositions/23/add_block/ HTTP/1.1
+      Host: pretix.eu
+      Accept: application/json, text/javascript
+      Content-Type: application/json
+
+     {
+       "name": "api:block1"
+     }
+
+   **Example response**:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 200 OK
+      Vary: Accept
+      Content-Type: application/json
+
+      (Full order position resource, see above.)
+
+   :param organizer: The ``slug`` field of the organizer of the event
+   :param event: The ``slug`` field of the event
+   :param code: The ``id`` field of the order position to update
+
+   :statuscode 200: no error
+   :statuscode 400: The order position could not be updated due to invalid submitted data.
+   :statuscode 401: Authentication failure
+   :statuscode 403: The requested organizer/event does not exist **or** you have no permission to update this order position.
+
+.. http:post:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/(id)/remove_block/
+
+   Unblocks an order position from being used. The block name either needs to be ``"admin"`` or start with ``"api:"``. It
+   may only contain letters, numbers, dots and underscores. ``"admin"`` represents the regular block that can be set
+   in the backend user interface. Blocks set by plugins cannot be lifted through this API.
+
+   **Example request**:
+
+   .. sourcecode:: http
+
+      POST /api/v1/organizers/bigevents/events/sampleconf/orderpositions/23/remove_block/ HTTP/1.1
+      Host: pretix.eu
+      Accept: application/json, text/javascript
+      Content-Type: application/json
+
+     {
+       "name": "api:block1"
+     }
+
+   **Example response**:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 200 OK
+      Vary: Accept
+      Content-Type: application/json
+
+      (Full order position resource, see above.)
+
+   :param organizer: The ``slug`` field of the organizer of the event
+   :param event: The ``slug`` field of the event
+   :param code: The ``id`` field of the order position to update
+
+   :statuscode 200: no error
+   :statuscode 400: The order position could not be updated due to invalid submitted data.
+   :statuscode 401: Authentication failure
+   :statuscode 403: The requested organizer/event does not exist **or** you have no permission to update this order position.
+
 Changing order contents
 -----------------------
 
@@ -1889,7 +1976,7 @@ otherwise, such as splitting an order or changing fees.
 
    * ``patch_positions``: A list of objects with the two keys ``position`` specifying an order position ID and
      ``body`` specifying the desired changed values of the position (``item``, ``variation``, ``subevent``, ``seat``,
-     ``price``, ``tax_rule``).
+     ``price``, ``tax_rule``, ``valid_from``, ``valid_until``).
 
    * ``cancel_positions``: A list of objects with the single key ``position`` specifying an order position ID.
 
@@ -1916,7 +2003,7 @@ otherwise, such as splitting an order or changing fees.
 
    .. sourcecode:: http
 
-      POST /api/v1/organizers/bigevents/events/sampleconf/orders/ABC12/ HTTP/1.1
+      POST /api/v1/organizers/bigevents/events/sampleconf/orders/ABC12/change/ HTTP/1.1
       Host: pretix.eu
       Accept: application/json, text/javascript
       Content-Type: application/json
@@ -1996,14 +2083,6 @@ otherwise, such as splitting an order or changing fees.
 
 Order payment endpoints
 -----------------------
-
-.. versionchanged:: 3.6
-
-   Payments can now be created through the API.
-
-.. versionchanged:: 3.12
-
-   The ``confirm`` operation now takes a ``send_email`` parameter.
 
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/payments/
 
@@ -2310,6 +2389,7 @@ Order refund endpoints
             "created": "2017-12-01T10:00:00Z",
             "execution_date": "2017-12-04T12:13:12Z",
             "comment": "Cancellation",
+            "details": {},
             "provider": "banktransfer"
           }
         ]
@@ -2353,6 +2433,7 @@ Order refund endpoints
         "created": "2017-12-01T10:00:00Z",
         "execution_date": "2017-12-04T12:13:12Z",
         "comment": "Cancellation",
+        "details": {},
         "provider": "banktransfer"
       }
 
@@ -2410,6 +2491,7 @@ Order refund endpoints
         "created": "2017-12-01T10:00:00Z",
         "execution_date": null,
         "comment": "Cancellation",
+        "details": {},
         "provider": "manual"
       }
 
@@ -2539,10 +2621,6 @@ Revoked ticket secrets
 
 With some non-default ticket secret generation methods, a list of revoked ticket secrets is required for proper validation.
 
-.. versionchanged:: 3.12
-
-   Added revocation lists.
-
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/revokedsecrets/
 
    Returns a list of all revoked secrets within a given event.
@@ -2584,6 +2662,60 @@ With some non-default ticket secret generation methods, a list of revoked ticket
    :param event: The ``slug`` field of the event to fetch
    :resheader X-Page-Generated: The server time at the beginning of the operation. If you're using this API to fetch
                                 differences, this is the value you want to use as ``created_since`` in your next call.
+   :statuscode 200: no error
+   :statuscode 401: Authentication failure
+   :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
+
+Blocked ticket secrets
+----------------------
+
+With some non-default ticket secret generation methods, a list of blocked ticket secrets is required for proper validation.
+This endpoint returns all secrets that are currently blocked **or have been blocked before and are now unblocked**, so
+be sure to check the ``blocked`` attribute for its actual value. The list is currently always ordered with the most
+recently updated ones first.
+
+.. http:get:: /api/v1/organizers/(organizer)/events/(event)/blockedsecrets/
+
+   Returns a list of all blocked or historically blocked secrets within a given event.
+
+   **Example request**:
+
+   .. sourcecode:: http
+
+      GET /api/v1/organizers/bigevents/events/sampleconf/blockedsecrets/ HTTP/1.1
+      Host: pretix.eu
+      Accept: application/json, text/javascript
+
+   **Example response**:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 200 OK
+      Vary: Accept
+      Content-Type: application/json
+      X-Page-Generated: 2017-12-01T10:00:00Z
+
+      {
+        "count": 1,
+        "next": null,
+        "previous": null,
+        "results": [
+          {
+            "id": 1234,
+            "secret": "k24fiuwvu8kxz3y1",
+            "blocked": true,
+            "updated": "2017-12-01T10:00:00Z",
+          }
+        ]
+      }
+
+   :query integer page: The page number in case of a multi-page result set, default is 1
+   :query datetime updated_since: Only return records that have been updated since the given date.
+   :query boolean blocked: Only return blocked / non-blocked records.
+   :param organizer: The ``slug`` field of the organizer to fetch
+   :param event: The ``slug`` field of the event to fetch
+   :resheader X-Page-Generated: The server time at the beginning of the operation. If you're using this API to fetch
+                                differences, this is the value you want to use as ``updated_since`` in your next call.
    :statuscode 200: no error
    :statuscode 401: Authentication failure
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.

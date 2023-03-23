@@ -257,7 +257,10 @@ class EventWizard(SafeSessionWizardView):
     def done(self, form_list, form_dict, **kwargs):
         foundation_data = self.get_cleaned_data_for_step('foundation')
         basics_data = self.get_cleaned_data_for_step('basics')
-        copy_data = self.get_cleaned_data_for_step('copy')
+        try:
+            copy_data = self.get_cleaned_data_for_step('copy')
+        except KeyError:
+            copy_data = None
 
         with transaction.atomic(), language(basics_data['locale']):
             event = form_dict['basics'].instance
@@ -276,7 +279,10 @@ class EventWizard(SafeSessionWizardView):
                     t.limit_events.add(event)
                 elif event.organizer.settings.event_team_provisioning:
                     t = Team.objects.create(
-                        organizer=event.organizer, name=_('Team {event}').format(event=event.name),
+                        organizer=event.organizer,
+                        name=_('Team {event}').format(
+                            event=str(event.name)[:100] + "…" if len(str(event.name)) > 100 else str(event.name)
+                        ),
                         can_change_event_settings=True, can_change_items=True,
                         can_view_orders=True, can_change_orders=True, can_view_vouchers=True,
                         can_change_vouchers=True
@@ -300,10 +306,11 @@ class EventWizard(SafeSessionWizardView):
                 event.set_active_plugins(settings.PRETIX_PLUGINS_DEFAULT.split(","),
                                          allow_restricted=settings.PRETIX_PLUGINS_DEFAULT.split(","))
                 event.save(update_fields=['plugins'])
-                event.checkin_lists.create(
-                    name=_('Default'),
-                    all_products=True
-                )
+                if not event.has_subevents:
+                    event.checkin_lists.create(
+                        name=_('Default'),
+                        all_products=True
+                    )
                 event.set_defaults()
 
             if basics_data['tax_rate']:

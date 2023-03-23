@@ -23,7 +23,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, Exists, IntegerField, OuterRef, Subquery
+from django.db.models import Count, Exists, IntegerField, OuterRef, Q, Subquery
 from django.utils.translation import gettext
 from i18nfield.strings import LazyI18nString
 
@@ -35,12 +35,14 @@ from pretix.base.models import (
     SubEvent, User, WaitingListEntry,
 )
 from pretix.base.services.locking import LockTimeoutException
-from pretix.base.services.mail import SendMailException, TolerantDict, mail
+from pretix.base.services.mail import SendMailException, mail
 from pretix.base.services.orders import (
     OrderChangeManager, OrderError, _cancel_order, _try_auto_refund,
 )
 from pretix.base.services.tasks import ProfiledEventTask
 from pretix.celery_app import app
+from pretix.helpers import OF_SELF
+from pretix.helpers.format import format_map
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,7 @@ def _send_wle_mail(wle: WaitingListEntry, subject: LazyI18nString, message: Lazy
         try:
             mail(
                 wle.email,
-                str(subject).format_map(TolerantDict(email_context)),
+                format_map(subject, email_context),
                 message,
                 email_context,
                 wle.event,
@@ -71,7 +73,7 @@ def _send_mail(order: Order, subject: LazyI18nString, message: LazyI18nString, s
 
         email_context = get_email_context(event_or_subevent=subevent or order.event, refund_amount=refund_amount,
                                           order=order, position_or_address=ia, event=order.event)
-        real_subject = str(subject).format_map(TolerantDict(email_context))
+        real_subject = format_map(subject, email_context)
         try:
             order.send_mail(
                 real_subject, message, email_context,
@@ -86,7 +88,7 @@ def _send_mail(order: Order, subject: LazyI18nString, message: LazyI18nString, s
                 continue
 
             if p.addon_to_id is None and p.attendee_email and p.attendee_email != order.email:
-                real_subject = str(subject).format_map(TolerantDict(email_context))
+                real_subject = format_map(subject, email_context)
                 email_context = get_email_context(event_or_subevent=p.subevent or order.event,
                                                   event=order.event,
                                                   refund_amount=refund_amount,
@@ -120,9 +122,13 @@ def cancel_event(self, event: Event, subevent: int, auto_refund: bool,
     s = OrderPosition.objects.filter(
         order=OuterRef('pk')
     ).order_by().values('order').annotate(k=Count('id')).values('k')
-    orders_to_cancel = event.orders.annotate(pcnt=Subquery(s, output_field=IntegerField())).filter(
+    has_blocked = OrderPosition.objects.filter(order_id=OuterRef('pk'), blocked__isnull=False)
+    orders_to_cancel = event.orders.annotate(
+        pcnt=Subquery(s, output_field=IntegerField()),
+        has_blocked=Exists(has_blocked),
+    ).filter(
         status__in=[Order.STATUS_PAID, Order.STATUS_PENDING, Order.STATUS_EXPIRED],
-        pcnt__gt=0
+        pcnt__gt=0,
     ).all()
 
     if subevent or subevents_from:
@@ -144,13 +150,14 @@ def cancel_event(self, event: Event, subevent: int, auto_refund: bool,
             has_subevent=Exists(has_subevent),
             has_other_subevent=Exists(has_other_subevent),
         ).filter(
-            has_subevent=True, has_other_subevent=True
+            Q(has_subevent=True, has_other_subevent=True) |
+            Q(has_subevent=True, has_blocked=True)
         )
         orders_to_cancel = orders_to_cancel.annotate(
             has_subevent=Exists(has_subevent),
             has_other_subevent=Exists(has_other_subevent),
         ).filter(
-            has_subevent=True, has_other_subevent=False
+            has_subevent=True, has_other_subevent=False, has_blocked=False
         )
 
         for se in subevents:
@@ -165,7 +172,8 @@ def cancel_event(self, event: Event, subevent: int, auto_refund: bool,
     else:
         subevents = None
         subevent_ids = set()
-        orders_to_change = event.orders.none()
+        orders_to_change = orders_to_cancel.filter(has_blocked=True)
+        orders_to_cancel = orders_to_cancel.filter(has_blocked=False)
         event.log_action(
             'pretix.event.canceled', user=user,
         )
@@ -238,14 +246,14 @@ def cancel_event(self, event: Event, subevent: int, auto_refund: bool,
 
     for o in orders_to_change.values_list('id', flat=True).iterator():
         with transaction.atomic():
-            o = event.orders.select_for_update().get(pk=o)
+            o = event.orders.select_for_update(of=OF_SELF).get(pk=o)
             total = Decimal('0.00')
             fee = Decimal('0.00')
             positions = []
 
             ocm = OrderChangeManager(o, user=user, notify=False)
             for p in o.positions.all():
-                if p.subevent_id in subevent_ids:
+                if (not event.has_subevents or p.subevent_id in subevent_ids) and not p.blocked:
                     total += p.price
                     ocm.cancel(p)
                     positions.append(p)

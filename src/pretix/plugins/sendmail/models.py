@@ -22,7 +22,7 @@
 from datetime import datetime, time, timedelta
 
 from django.db import models
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from django.utils.formats import date_format
 from django.utils.timezone import make_aware
@@ -31,6 +31,7 @@ from django_scopes import ScopedManager
 from i18nfield.fields import I18nCharField, I18nTextField
 
 from pretix.base.email import get_email_context
+from pretix.base.i18n import language
 from pretix.base.models import (
     Event, InvoiceAddress, Item, Order, OrderPosition, SubEvent,
 )
@@ -92,6 +93,8 @@ class ScheduledMail(models.Model):
                 is_dst=False,  # prevent AmbiguousTimeError
             )
 
+        if self.computed_datetime > timezone.now() and self.state == self.STATE_MISSED:
+            self.state = self.STATE_SCHEDULED
         self.last_computed = timezone.now()
 
     def send(self):
@@ -115,7 +118,13 @@ class ScheduledMail(models.Model):
                 Exists(OrderPosition.objects.filter(order=OuterRef('pk'), item_id__in=limit_products))
             )
 
-        status = [Order.STATUS_PENDING, Order.STATUS_PAID] if self.rule.include_pending else [Order.STATUS_PAID]
+        if self.rule.include_pending:
+            status_q = Q(status__in=[Order.STATUS_PAID, Order.STATUS_PENDING])
+        else:
+            status_q = Q(
+                Q(status=Order.STATUS_PAID) |
+                Q(status=Order.STATUS_PENDING, valid_if_pending=True)
+            )
 
         if self.last_successful_order_id:
             orders = orders.filter(
@@ -123,7 +132,7 @@ class ScheduledMail(models.Model):
             )
 
         orders = orders.filter(
-            status__in=status,
+            status_q,
             require_approval=False,
         ).order_by('pk').select_related('invoice_address').prefetch_related('positions')
 
@@ -131,43 +140,45 @@ class ScheduledMail(models.Model):
         send_to_attendees = self.rule.send_to in (Rule.ATTENDEES, Rule.BOTH)
 
         for o in orders:
-            positions = list(o.positions.all())
-            o_sent = False
+            with language(o.locale, e.settings.region):
+                positions = list(o.positions.all())
+                o_sent = False
 
-            try:
-                ia = o.invoice_address
-            except InvoiceAddress.DoesNotExist:
-                ia = InvoiceAddress(order=o)
-
-            if send_to_orders and o.email:
-                email_ctx = get_email_context(event=e, order=o, position_or_address=ia)
                 try:
-                    o.send_mail(self.rule.subject, self.rule.template, email_ctx,
-                                log_entry_type='pretix.plugins.sendmail.rule.order.email.sent')
-                    o_sent = True
-                except SendMailException:
-                    ...  # ¯\_(ツ)_/¯
+                    ia = o.invoice_address
+                except InvoiceAddress.DoesNotExist:
+                    ia = InvoiceAddress(order=o)
 
-            if send_to_attendees:
-                if not self.rule.all_products:
-                    positions = [p for p in positions if p.item_id in limit_products]
-                if self.subevent_id:
-                    positions = [p for p in positions if p.subevent_id == self.subevent_id]
-
-                for p in positions:
-                    email_ctx = get_email_context(event=e, order=o, position_or_address=ia, position=p)
+                if send_to_orders and o.email:
+                    email_ctx = get_email_context(event=e, order=o, invoice_address=ia)
                     try:
-                        if p.attendee_email and (p.attendee_email != o.email or not o_sent):
-                            p.send_mail(self.rule.subject, self.rule.template, email_ctx,
-                                        log_entry_type='pretix.plugins.sendmail.rule.order.position.email.sent')
-                        elif not o_sent and o.email:
-                            o.send_mail(self.rule.subject, self.rule.template, email_ctx,
-                                        log_entry_type='pretix.plugins.sendmail.rule.order.email.sent')
-                            o_sent = True
+                        o.send_mail(self.rule.subject, self.rule.template, email_ctx,
+                                    log_entry_type='pretix.plugins.sendmail.rule.order.email.sent')
+                        o_sent = True
                     except SendMailException:
                         ...  # ¯\_(ツ)_/¯
 
-            self.last_successful_order_id = o.pk
+                if send_to_attendees:
+                    if not self.rule.all_products:
+                        positions = [p for p in positions if p.item_id in limit_products]
+                    if self.subevent_id:
+                        positions = [p for p in positions if p.subevent_id == self.subevent_id]
+
+                    for p in positions:
+                        try:
+                            if p.attendee_email and (p.attendee_email != o.email or not o_sent):
+                                email_ctx = get_email_context(event=e, order=o, invoice_address=ia, position=p)
+                                p.send_mail(self.rule.subject, self.rule.template, email_ctx,
+                                            log_entry_type='pretix.plugins.sendmail.rule.order.position.email.sent')
+                            elif not o_sent and o.email:
+                                email_ctx = get_email_context(event=e, order=o, invoice_address=ia)
+                                o.send_mail(self.rule.subject, self.rule.template, email_ctx,
+                                            log_entry_type='pretix.plugins.sendmail.rule.order.email.sent')
+                                o_sent = True
+                        except SendMailException:
+                            ...  # ¯\_(ツ)_/¯
+
+                self.last_successful_order_id = o.pk
 
 
 class Rule(models.Model, LoggingMixin):
@@ -240,7 +251,7 @@ class Rule(models.Model, LoggingMixin):
                 if sm.computed_datetime != previous:
                     update_sms.append(sm)
 
-            ScheduledMail.objects.bulk_update(update_sms, ['computed_datetime', 'last_computed'], 100)
+            ScheduledMail.objects.bulk_update(update_sms, ['computed_datetime', 'last_computed', 'state'], 100)
 
     @property
     def human_readable_time(self):

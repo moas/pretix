@@ -1,4 +1,4 @@
-.. spelling::
+.. spelling:word-list::
 
    geo
    lat
@@ -49,36 +49,12 @@ valid_keys                            object                     Cryptographic k
                                                                  only contained in detail views. Value can be cached.
 sales_channels                        list                       A list of sales channels this event is available for
                                                                  sale on.
+public_url                            string                     The public, customer-facing URL of the event (read-only).
 ===================================== ========================== =======================================================
-
-
-.. versionchanged:: 3.3
-
-   The attributes ``geo_lat`` and ``geo_lon`` have been added.
-
-.. versionchanged:: 3.4
-
-   The attribute ``timezone`` has been added.
-
-.. versionchanged:: 3.7
-
-   The attribute ``item_meta_properties`` has been added.
-
-.. versionchanged:: 3.12
-
-   The attribute ``valid_keys`` has been added.
-
-.. versionchanged:: 3.14
-
-    The attribute ``sales_channels`` has been added.
 
 
 Endpoints
 ---------
-
-.. versionchanged:: 3.3
-
-    The events resource can now be filtered by meta data attributes.
 
 .. versionchanged:: 4.0
 
@@ -89,6 +65,10 @@ Endpoints
     The ``with_availability_for`` parameter has been added.
 
     The ``search`` query parameter has been added to filter events by their slug, name, or location in any language.
+
+.. versionchanged:: 4.17
+
+    The ``public_url`` field has been added.
 
 .. http:get:: /api/v1/organizers/(organizer)/events/
 
@@ -148,7 +128,8 @@ Endpoints
               "web",
               "pretixpos",
               "resellers"
-            ]
+            ],
+            "public_url": "https://pretix.eu/bigevents/sampleconf/"
           }
         ]
       }
@@ -156,6 +137,7 @@ Endpoints
    :query page: The page number in case of a multi-page result set, default is 1
    :query is_public: If set to ``true``/``false``, only events with a matching value of ``is_public`` are returned.
    :query live: If set to ``true``/``false``, only events with a matching value of ``live`` are returned.
+   :query testmode: If set to ``true``/``false``, only events with a matching value of ``testmode`` are returned.
    :query has_subevents: If set to ``true``/``false``, only events with a matching value of ``has_subevents`` are returned.
    :query is_future: If set to ``true`` (``false``), only events that happen currently or in the future are (not) returned. Event series are never (always) returned.
    :query is_past: If set to ``true`` (``false``), only events that are over are (not) returned. Event series are never (always) returned.
@@ -236,7 +218,8 @@ Endpoints
           "web",
           "pretixpos",
           "resellers"
-        ]
+        ],
+        "public_url": "https://pretix.eu/bigevents/sampleconf/"
       }
 
    :param organizer: The ``slug`` field of the organizer to fetch
@@ -332,7 +315,8 @@ Endpoints
           "web",
           "pretixpos",
           "resellers"
-        ]
+        ],
+        "public_url": "https://pretix.eu/bigevents/sampleconf/"
       }
 
    :param organizer: The ``slug`` field of the organizer of the event to create.
@@ -436,7 +420,8 @@ Endpoints
           "web",
           "pretixpos",
           "resellers"
-        ]
+        ],
+        "public_url": "https://pretix.eu/bigevents/sampleconf/"
       }
 
    :param organizer: The ``slug`` field of the organizer of the event to create.
@@ -510,7 +495,8 @@ Endpoints
           "web",
           "pretixpos",
           "resellers"
-        ]
+        ],
+        "public_url": "https://pretix.eu/bigevents/sampleconf/"
       }
 
    :param organizer: The ``slug`` field of the organizer of the event to update
@@ -566,10 +552,6 @@ information about the properties.
 
 .. warning:: This API is intended for advanced users. Even though we take care to validate your input, you will be
              able to break your event using this API by creating situations of conflicting settings. Please take care.
-
-.. versionchanged:: 3.6
-
-   Initial support for settings has been added to the API.
 
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/settings/
 

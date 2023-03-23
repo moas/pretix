@@ -30,11 +30,9 @@ function preview_task_error(item) {
     }
 }
 
-$(function () {
-    "use strict";
-
-    $('.mail-preview .placeholder').tooltip();
-    $('a[type=preview]').on('click', function () {
+function mail_preview_setup($el) {
+    $el.find('.mail-preview .placeholder').tooltip();
+    $el.find('a[type=preview]').on('click', function () {
         var itemName = $(this).closest('.preview-panel').attr('for');
         if ($('#' + itemName + '_panel').data('ajaxing') || $(this).parent('.active').length !== 0) {
             return;
@@ -45,7 +43,7 @@ $(function () {
         var previewUrl = $(parentForm).attr('mail-preview-url');
         var token = $(parentForm).find('input[name=csrfmiddlewaretoken]').val();
         var dataString = 'item=' + itemName + '&csrfmiddlewaretoken=' + token;
-        $('#' + itemName + '_edit textarea').each(function () {
+        $('#' + itemName + '_edit textarea, #' + itemName + '_edit input').each(function () {
             dataString += '&' + $(this).serialize();
         });
 
@@ -65,5 +63,13 @@ $(function () {
             }
         );
 
+    });
+}
+
+$(function () {
+    "use strict";
+    mail_preview_setup($("body"));
+    $(document).on("pretix:bind-forms", function () {
+        mail_preview_setup($("body"));
     });
 });
